@@ -161,9 +161,10 @@ def _load_epoch_schema() -> Mapping[str, FeatureSchema]:
     candidate_paths: List[Path] = []
     if env_path:
         candidate_paths.append(Path(env_path))
+    repo_root = Path(__file__).resolve().parents[2]
     candidate_paths.extend([
-        Path(__file__).resolve().parent.parent / "parameters" / "EPOCH_FEATURES.csv",
-        Path(__file__).resolve().parent.parent / "data" / "EPOCH_FEATURES.csv",
+        repo_root / "parameters" / "EPOCH_FEATURES.csv",
+        repo_root / "data" / "EPOCH_FEATURES.csv",
     ])
 
     for path in candidate_paths:
