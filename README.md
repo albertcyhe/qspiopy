@@ -57,3 +57,34 @@ The default locations for the artefacts (`artifacts/EPOCH_FEATURES.csv` and
 `artifacts/QSP_OUT.csv`) mirror the paths consumed by downstream contract
 tests, but both can be overridden via the CLI arguments to match bespoke
 pipelines.
+
+## Tutorial reproduction helper
+
+The MATLAB tutorial referenced in the publication ships with rich parameter
+catalogues (`parameters/example1_parameters.json`, `parameters/example2_parameters.json`).
+To explore those scenarios – or external catalogues such as the TNBC project –
+without launching MATLAB you can rely on the reduced-order Python surrogate::
+
+    python -m scripts.reproduce_tutorial \
+        --parameters parameters/example1_parameters.json \
+        --therapy anti_pd1 \
+        --output artifacts/example1_python.csv
+
+The CLI will resolve all derived parameters, run the simplified tumour/T-cell
+model, and emit a CSV containing tumour volume, diameter, and cell counts over
+time.  Multiple `--parameters` flags can be provided to layer project-specific
+overrides on top of the base catalogue, mirroring the MATLAB workflow.
+
+## Consistency and performance validation
+
+To contrast the lightweight surrogate against the mechanistic reference
+equations, run:
+
+```bash
+python -m scripts.validate_surrogate --output artifacts/validation
+```
+
+The command generates paired CSV trajectories for the Example 1/2 scenarios,
+computes RMSE/R²/ΔAUC/TGI statistics, and records a wall-clock comparison
+between the surrogate and the reference solver.  The resulting artefacts power
+the quantitative assessment documented in `docs/algorithm_consistency.md`.

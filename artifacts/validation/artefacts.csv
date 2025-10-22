@@ -1,0 +1,4 @@
+scenario,surrogate,reference
+example1_control,artifacts/validation/example1_control_surrogate.csv,artifacts/validation/example1_control_reference.csv
+example1_treated,artifacts/validation/example1_treated_surrogate.csv,artifacts/validation/example1_treated_reference.csv
+example2_treated,artifacts/validation/example2_treated_surrogate.csv,artifacts/validation/example2_treated_reference.csv
