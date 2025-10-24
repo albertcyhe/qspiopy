@@ -81,10 +81,42 @@ To contrast the lightweight surrogate against the mechanistic reference
 equations, run:
 
 ```bash
-python -m scripts.validate_surrogate --output artifacts/validation
+python -m scripts.validate_surrogate \
+  --output artifacts/validation \
+  --seed 42 \
+  --emit-diagnostics \
+  --scenarios all
 ```
 
-The command generates paired CSV trajectories for the Example 1/2 scenarios,
-computes RMSE/R²/ΔAUC/TGI statistics, and records a wall-clock comparison
-between the surrogate and the reference solver.  The resulting artefacts power
-the quantitative assessment documented in `docs/algorithm_consistency.md`.
+The command generates paired CSV trajectories for the Example 1/2 scenarios by
+comparing the frozen-core Python runtime (`simulate_frozen_model`) against the
+MATLAB snapshot references, computes RMSE/R²/ΔAUC/TGI statistics, records a
+wall-clock comparison, and emits solver/banner diagnostics with alignment
+summaries. The resulting
+artefacts power the quantitative assessment documented in
+`docs/semantic_equivalence_report.md`.
+
+To consolidate the per-scenario diagnostics into publishable tables run:
+
+```bash
+python -m scripts.summarize_equivalence \
+  --validation-dir artifacts/validation \
+  --output-dir artifacts/analysis
+```
+
+The generated CSV files (`alignment_metrics.csv`, `alignment_summary.csv`,
+`model_scale.csv`, `event_logs.csv`) provide the backbone for the tables outlined in the report.
+
+To render the core figures described in the paper plan:
+
+```bash
+python -m scripts.plot_equivalence \
+  --analysis-dir artifacts/analysis \
+  --validation-dir artifacts/validation \
+  --plots-dir plots
+```
+
+This command produces the max-relative-error boxplot, event residual chart,
+representative overlay plots, and tolerance sweep curves under `plots/`.
+Add `--use-tutorial-surrogate` if you need to compare against the reduced
+contract-testing surrogate instead of the frozen snapshot.

@@ -1,0 +1,2 @@
+ODEs:
+d(Central.x)/dt = -k*Central.x + infusion_rate

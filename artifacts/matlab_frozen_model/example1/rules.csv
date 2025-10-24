@@ -1,0 +1,19 @@
+rule_index,name,type,target,expression
+1,,repeatedAssignment,V_T,V_Tmin+vol_cell*C_x+vol_Tcell*T_exh+vol_cell*V_T.C1+vol_Tcell*V_T.T1+vol_Tcell*V_T.T0
+2,,repeatedAssignment,C_total,0*cell+C1
+3,,repeatedAssignment,T_total,0*cell+V_T.T1+V_T.T0
+4,,repeatedAssignment,T_total_LN,0*cell+V_LN.T1
+5,,repeatedAssignment,R_Tcell,0*cell/day+k_C_T1*V_T.T1*V_T.C1/(C_total+T_total+cell)*(1-H_PD1_C1)
+6,,repeatedAssignment,N_aT,N0 + N_IL2*IL2/(IL2_50+IL2)
+7,,repeatedAssignment,Tregs_,V_T.T0
+8,,repeatedAssignment,H_APC,n_sites_APC*V_LN.APC/(n_sites_APC*V_LN.APC+T_total_LN+cell)
+9,,repeatedAssignment,H_mAPC,n_sites_APC*V_LN.mAPC/(n_sites_APC*V_LN.mAPC+T_total_LN+cell)
+10,,repeatedAssignment,pTCR_p0_MHC_tot,0.5*(A_s.M1p0/n_T0_clones+TCR_p0_tot+k_M1p0_TCR_off/k_M1p0_TCR_on-TCR_p0_tot*(((A_s.M1p0/n_T0_clones+TCR_p0_tot+k_M1p0_TCR_off/k_M1p0_TCR_on)/TCR_p0_tot)^2-4*A_s.M1p0/n_T0_clones/TCR_p0_tot)^0.5)
+11,,repeatedAssignment,H_P0,pTCR_p0_MHC_tot/(pTCR_p0_MHC_tot+p0_50)
+12,,repeatedAssignment,pTCR_p1_MHC_tot,k_M1p1_TCR_off/(k_M1p1_TCR_off+phi_M1p1_TCR)*(k_M1p1_TCR_p/(k_M1p1_TCR_off+k_M1p1_TCR_p))^N_M1p1_TCR*(0.5*(A_s.M1p1/n_T1_clones+TCR_p1_tot+k_M1p1_TCR_off/k_M1p1_TCR_on-TCR_p1_tot*(((A_s.M1p1/n_T1_clones+TCR_p1_tot+k_M1p1_TCR_off/k_M1p1_TCR_on)/TCR_p1_tot)^2-4*A_s.M1p1/n_T1_clones/TCR_p1_tot)^0.5))
+13,,repeatedAssignment,H_P1,pTCR_p1_MHC_tot/(pTCR_p1_MHC_tot+p1_50)
+14,,repeatedAssignment,aPD1,V_T.nivolumab
+15,,initialAssignment,syn_T1_C1.PD1,T_PD1_total /A_Tcell
+16,,initialAssignment,syn_T1_C1.PDL1,C_PDL1_total /A_cell
+17,,initialAssignment,syn_T1_C1.PDL2,C_PDL2_total /A_cell
+18,,repeatedAssignment,H_PD1_C1,((syn_T1_C1.PD1_PDL1+syn_T1_C1.PD1_PDL2)/PD1_50)^n_PD1/(((syn_T1_C1.PD1_PDL1+syn_T1_C1.PD1_PDL2)/PD1_50)^n_PD1 + 1)

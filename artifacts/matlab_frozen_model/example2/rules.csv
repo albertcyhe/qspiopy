@@ -1,0 +1,12 @@
+rule_index,name,type,target,expression
+1,,repeatedAssignment,V_T,V_Tmin+vol_cell*C_x+vol_Tcell*T_exh+vol_cell*V_T.C1+vol_cell*V_T.C2+vol_Tcell*V_T.T1+vol_Tcell*V_T.T2
+2,,repeatedAssignment,C_total,0*cell+C1+C2
+3,,repeatedAssignment,T_total,0*cell+V_T.T1+V_T.T2
+4,,repeatedAssignment,T_total_LN,0*cell+V_LN.T1+V_LN.T2
+5,,repeatedAssignment,R_Tcell,0*cell/day+k_C_T1*V_T.T1*V_T.C1/(C_total+T_total+cell)*(1-H_PD1_C1)+k_C_T2*V_T.T2*V_T.C1/(C_total+T_total+cell)*(1-H_PD1_C1)+k_C_T2*V_T.T2*V_T.C2/(C_total+T_total+cell)*(1-H_PD1_C1)
+6,,repeatedAssignment,N_aT,N0 + N_IL2*IL2/(IL2_50+IL2)
+7,,repeatedAssignment,aPD1,V_T.nivolumab
+8,,initialAssignment,syn_T1_C1.PD1,T_PD1_total /A_Tcell
+9,,initialAssignment,syn_T1_C1.PDL1,C_PDL1_total /A_cell
+10,,initialAssignment,syn_T1_C1.PDL2,C_PDL2_total /A_cell
+11,,repeatedAssignment,H_PD1_C1,((syn_T1_C1.PD1_PDL1+syn_T1_C1.PD1_PDL2)/PD1_50)^n_PD1/(((syn_T1_C1.PD1_PDL1+syn_T1_C1.PD1_PDL2)/PD1_50)^n_PD1 + 1)

@@ -1,1 +1,20 @@
 .DS_Store
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+devel/
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
+
+# Reports and plots generated during analysis
+plots/
+artifacts/analysis/
+artifacts/validation/*_surrogate.csv
+artifacts/validation/events_*_python.csv
+artifacts/validation/reference_alignment.csv
+
+# Virtual environments
+.venv/

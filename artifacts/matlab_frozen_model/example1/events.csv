@@ -1,0 +1,2 @@
+event_index,name,trigger,delay,delay_type,assignments
+1,,V_T.C1<0.9*cell,0,,V_T.C1 = 0*cell

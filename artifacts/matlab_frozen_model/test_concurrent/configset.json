@@ -1,0 +1,1 @@
+{"SolverType":"sundials","StopTime":1,"TimeUnits":"day","SolverOptions":{"AbsoluteTolerance":1e-8,"RelativeTolerance":1e-6},"CompileOptions":{"DefaultSpeciesDimension":"amount"}}

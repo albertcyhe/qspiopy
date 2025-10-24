@@ -1,0 +1,2 @@
+rule_index,name,type,target,expression
+1,,repeatedAssignment,infusion_rate,infusion_on*base_rate

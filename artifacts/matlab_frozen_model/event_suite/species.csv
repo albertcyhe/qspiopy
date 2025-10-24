@@ -1,0 +1,2 @@
+identifier,name,compartment,initial_amount,initial_units,constant_amount,current_value,boundary_condition,nonnegative,units,interpreted_dimension
+Central.x,x,Central,1.0,,false,1.0,false,true,,amount

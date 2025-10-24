@@ -1,0 +1,9 @@
+name,capacity,units,constant
+V_C,5,liter,true
+V_P,60,liter,true
+V_T,14410.6028079966,microliter,false
+V_LN,1374.44678594553,millimeter^3,true
+V_e,4e-16,litre,true
+A_e,15,micrometer^2,true
+A_s,900,micrometer^2,true
+syn_T1_C1,37.8,micrometer^2,true

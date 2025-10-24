@@ -1,0 +1,17 @@
+{
+  "SolverType": "ode15s",
+  "StopTime": 10.0,
+  "TimeUnits": "day",
+  "SolverOptions": {
+    "AbsoluteTolerance": 1e-12,
+    "RelativeTolerance": 1e-6,
+    "MaxStep": 0.0,
+    "InitialStep": 0.0,
+    "MaxOrder": 5
+  },
+  "CompileOptions": {
+    "DimensionalAnalysis": false,
+    "UnitConversion": false,
+    "DefaultSpeciesDimension": "amount"
+  }
+}

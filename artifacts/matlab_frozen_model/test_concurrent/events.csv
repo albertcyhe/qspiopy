@@ -1,0 +1,4 @@
+event_index,name,trigger,delay,delay_type,assignments
+1,,x>1,0,,A=5
+2,,x>1,0,,B=B+1
+3,,y<0,2,time,C=C+2

@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: ["*"]
+  pull_request:
+    branches: ["*"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy pandas scipy sympy pytest pydantic matplotlib
+
+      - name: Run unit tests
+        run: pytest
+
+      - name: Validate surrogate alignment
+        run: python -m scripts.validate_surrogate --scenarios all --replicates 1 --max-rel-err 1e-6 --emit-diagnostics --seed 12345
+
+      - name: Summarize equivalence metrics
+        run: python -m scripts.summarize_equivalence --output-dir artifacts/analysis
+
+      - name: Generate equivalence plots
+        run: python -m scripts.plot_equivalence --analysis-dir artifacts/analysis --validation-dir artifacts/validation --plots-dir plots --seed 12345
+
+      - name: Upload diagnostics (failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics
+          path: |
+            artifacts/validation/*_reference.csv
+            artifacts/validation/*_surrogate.csv
+            artifacts/validation/events_*_python.csv
+            artifacts/matlab_frozen_model/*/equations_eval_t0.csv
+            artifacts/analysis/alignment_metrics.csv
+
+      - name: Upload analysis assets (success)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysis-assets
+          path: |
+            artifacts/analysis/*.csv
+            plots/*.png
