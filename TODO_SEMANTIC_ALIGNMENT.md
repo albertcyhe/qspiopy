@@ -14,22 +14,22 @@
 ## 1. Priorities (P0 → P2)
 
 ### P0 (must‑have blockers)
-- [x] 按 `configset.json` 落实 **TimeUnits/StopTime/SolverOptions/CompileOptions(UnitConversion/DimensionalAnalysis)**。
-- [x] **单位/量纲判定**：基于 `species.csv.Units` + `CompileOptions.DefaultSpeciesDimension` 生成 `interpreted_dimension`（amount / conc / amount/vol 等）。
-- [x] **V_T 等体积量的单位归一**：若重复赋值来自 µm³ 累加，必须按 UnitConversion 语义转换到 **L**（例如 `V_T_L = V_T_um3 * 1e-15`）。
-- [x] **ODE 直译**：`f(t,y)` 中先评估 repeated assignment → 评估 `Fluxes:`（可缓存）→ 逐条评估 `ODEs:`。
-- [x] **t=0 快检**：逐条比对 `Fluxes:`/`ODEs:` 数值与 MATLAB 冻结；事件触发布尔判定一致。
+- [x] Honor `configset.json` for **TimeUnits/StopTime/SolverOptions/CompileOptions (UnitConversion/DimensionalAnalysis)**.
+- [x] Units/dimensions inference: derive `interpreted_dimension` from `species.csv.units` and `CompileOptions.DefaultSpeciesDimension` (amount / concentration / amount/volume, etc.).
+- [x] Volume normalisation (e.g., `V_T`): if repeated assignments accumulate µm³, convert to litres per UnitConversion (e.g., `V_T_L = V_T_um3 * 1e-15`).
+- [x] ODE direct evaluation: in `f(t, y)` evaluate repeated assignments → compute `Fluxes:` (cacheable) → evaluate `ODEs:` line by line.
+- [x] t=0 quick check: compare `Fluxes:`/`ODEs:` RHS against frozen MATLAB; event trigger booleans must match.
 
 ### P1 (core semantics)
-- [x] **重复赋值依赖拓扑**：从表达式 AST 建图，拓扑序求值；事件应用后**再次评估**。
-- [x] **事件调度**：多触发同时刻按模型顺序执行；事件后重评 repeated assignment；重启积分（`t_event+ε`）。
-- [x] **剂量（Dose）**：将 bolus/infusion 映射到事件/外源速率；t=0 剂量先于积分生效。
-- [x] **Species 标志**：`BoundaryCondition/Constant/(NonNegative)` 生效；反应不改 boundary 物种；必要时做非负钳制。
+- [x] Repeated assignments: build dependency graph from expression AST, evaluate in topological order; re‑evaluate after events.
+- [x] Event scheduling: execute all same‑time triggers in model order; re‑evaluate repeated assignments; restart integration at `t_event + ε`.
+- [x] Doses: map bolus to immediate events; infusion to exogenous rates across the interval; apply t=0 doses before integration.
+- [x] Species flags: enforce `BoundaryCondition`/`Constant`/`NonNegative` (clamp nonnegative after sync; reactions do not change boundary species).
 
 ### P2 (polish)
-- [x] **Rate/Algebraic Rules**：rate rule 进入状态导数；algebraic rule 用 root-finding 或事件式约束。
-- [x] **诊断与回归**：导出 `equations_eval_t0.csv`（变量名、Python 值、参考值、相对误差）；轨迹 RMSE 门槛。
-- [ ] **对照真值机（可选）**：SBML + RoadRunner 作为差异放大镜（以 `getequations` 结果为准）。
+- [x] Rate/Algebraic rules: inject rate rules into derivatives; solve algebraic rules via symbolic solution or residual assertions.
+- [x] Diagnostics/regression: export `equations_eval_t0.csv` (variable, python_value, reference_value, rel_err); enforce trajectory RMSE thresholds.
+- [ ] Optional oracle: SBML + RoadRunner as a difference magnifier (treat `getequations` as ground truth).
 
 ---
 
@@ -42,76 +42,75 @@
 
 ### 2.2 `species.csv` (augmented columns)
 - `name`, `compartment`, `initial_value`, `initial_units`
-- `units`（当前单位字符串）
+- `units` (string)
 - `boundary_condition` (bool), `constant` (bool), `nonnegative` (bool, optional)
-- `interpreted_dimension`（派生：amount / conc / amount/vol / other）
+- `interpreted_dimension` (derived: amount / concentration / amount/volume / other)
 
 ### 2.3 Others
 - `rules.csv`: `type(initial|repeated|rate|algebraic)`, `target`, `expr`
 - `events.csv`: `index_in_model`, `trigger`, `delay`, `assignments[]`
 - `doses.csv`: `type(bolus|infusion)`, `target`, `amount/units`, `time/interval/repeat`, `rate/units`
-- `variants.csv`: 名称、赋值列表、是否已应用
-- `equations.txt`: 原始 `getequations` 全文
+- `variants.csv`: variant name, assignment list, active flag
+- `equations.txt`: verbatim `getequations(model)` output
 
 ---
 
 ## 3. Python runtime semantics (frozen_model.py)
 
 ### 3.1 ODE evaluation order
-1) 解析配置，构建符号表（t, y, params, compartments）。  
-2) **Repeated Assignment**：按依赖图求值至固定点（单步内一次）。  
-3) 计算并缓存 **Fluxes**。  
-4) 按 `ODEs:` 逐条求 RHS，得到 `dy/dt`。  
-5) 执行 **Rate/Algebraic Rules**（如有）。  
+1) Parse config and construct the symbol table (t, y, parameters, compartments).  
+2) Evaluate repeated assignments to a fixed point (once per step).  
+3) Compute and cache **Fluxes**.  
+4) Evaluate `ODEs:` line by line to obtain `dy/dt`.  
+5) Apply **Rate/Algebraic rules** (when present).  
 
 ### 3.2 Events and doses
-- 以 `solve_ivp` 的事件接口或自定义“零点捕捉”触发；同刻并发按 `index_in_model` 顺序执行全部赋值；  
-- 赋值后**再次评估 repeated assignment**；以 `y(t_event+)` 作为新起点，`t ← t_event + ε` 继续积分；  
-- 剂量：bolus → 事件式瞬时加量；infusion → 事件包围的区间内叠加外源速率或引入临时 state/rule；  
-- t=0 剂量与初始赋值按 SimBiology 初始化时序先后应用。
+- Trigger via `solve_ivp` events (or custom root‑finding); execute concurrent events at the same time in `index_in_model` order.  
+- Re‑evaluate repeated assignments after applying event assignments; continue integration from `y(t_event+)` with `t ← t_event + ε`.  
+- Doses: bolus → instantaneous event; infusion → exogenous rate over the interval (or temporary state/rule).  
+- Apply t=0 doses and initial assignments following SimBiology’s initialization order.
 
 ### 3.3 Species flags and constraints
-- `BoundaryCondition=true`：反应不改该物种；若有 rate rule，仍由其驱动；  
-- `Constant=true`：在仿真期间不可被任何反应/规则改写；  
-- `NonNegative=true`：步后投影或事件式截断至 0。
+- `BoundaryCondition=true`: reactions do not change this species; a rate rule (if present) still governs it.  
+- `Constant=true`: disallow any reaction/rule updates during the simulation.  
+- `NonNegative=true`: project/clamp to 0 after steps or via event‑style truncation.
 
 ---
 
 ## 4. Units and dimensions
-
-- 内部以 `configset.TimeUnits` 作为时间基准，不再手工把所有参数改成 “per-day/per-min”。  
-- 对体积类量：**只在明确需要的表达式上做单位换算**（例如 `V_T_um3 → L` 用 `1e-15` 因子）。  
-- 浓度 vs 数量：若 `units` 缺失则按 `DefaultSpeciesDimension` 解释；否则按单位维度识别（amount、amount/vol…）。  
-- 以 `ODEs:` 是否出现 `1/compartment` 作为浓度状态的强信号，但不据此二次改写 RHS。
+- Use `configset.TimeUnits` as the time base; do not hand‑rewrite all parameters to per‑day/per‑minute.  
+- For volumes: perform conversions only where semantically required (e.g., `V_T_um3 → L` with factor `1e-15`).  
+- Concentration vs amount: if `units` are missing, use `DefaultSpeciesDimension`; otherwise infer from unit dimensions (amount, amount/volume, …).  
+- Presence of `1/compartment` in `ODEs:` is a strong signal for concentration states; do not rewrite RHS based on this alone.
 
 ---
 
 ## 5. t=0 quick check (must pass before updating references)
-- [x] 逐条计算 `Fluxes:`，与冻结参考比对（相对误差 ≤ 1e-9 或给定阈值）。  
-- [x] 逐条计算 `ODEs:` RHS，与冻结参考比对。  
-- [x] 评估所有 `events.trigger`（布尔），一致性通过。  
-- [x] 导出 `equations_eval_t0.csv`：`name, python_value, reference_value, rel_err`。
+- [x] Compute `Fluxes:` item by item and compare against the frozen reference (relative error ≤ 1e‑9 or configured threshold).  
+- [x] Compute `ODEs:` RHS item by item and compare.  
+- [x] Evaluate all `events.trigger` booleans and require consistency.  
+- [x] Export `equations_eval_t0.csv`: `name, python_value, reference_value, rel_err`.
 
 ---
 
 ## 6. Definition of Done
-- [ ] Example 1–N：关键观测量轨迹的 RMSE、最大相对误差在阈值内（阈值由模型规模与容差配置决定）。  
-- [ ] 全量事件时间戳一致（允许 ±事件容差）。  
-- [ ] 非负/边界/常数约束无违例（增加断言与日志）。  
-- [ ] 代码层单元测试覆盖：表达式解析、依赖拓扑、并发事件顺序、剂量应用、t=0 快检。  
+- [ ] Example 1–N: RMSE and maximum relative error for key observables are within thresholds (derived from model scale and solver tolerances).  
+- [ ] All event timestamps align within tolerance (± event tolerance).  
+- [ ] No violations of NonNegative/Boundary/Constant constraints (add assertions and logs).  
+- [ ] Unit test coverage: expression parsing, dependency topology, concurrent event ordering, dose application, t=0 quick check.  
 
 ---
 
 ## 7. Logging and diagnostics (suggested)
-- `--trace-step`：打印每步触发的事件、更新的 repeated assignment 目标及取值；  
-- `--trace-units`：打印单位判定与关键转换因子（如 µm³→L）；  
-- `--dump-t0`：输出 t=0 的 Flux/ODE/事件断言文件。
+- `--trace-step`: print each triggered event and the repeated‑assignment targets/values updated per step.  
+- `--trace-units`: print unit inference and key conversion factors (e.g., µm³→L).  
+- `--dump-t0`: emit Flux/ODE/event assertions at t=0.
 
 ---
 
 ## 8. Out of scope (for this phase)
-- 单位系统的全局自动换算（避免与 `getequations` 叠加造成二次缩放）。  
-- 复杂代数规则的高级数值稳定性优化（先保证正确性，再优化）。
+- Global unit system auto‑conversion (avoid double scaling on top of `getequations`).  
+- Advanced numerical stability optimisations for complex algebraic systems (focus on correctness first).
 
 ---
 
