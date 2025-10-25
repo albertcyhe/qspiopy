@@ -1,4 +1,4 @@
-"""Compare the lightweight tutorial surrogate against the reference model."""
+"""Validate frozen SimBiology snapshots against MATLAB references."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from typing import Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from src.offline import simulate_tutorial
 from src.offline.frozen_model import EVENT_LOG_FIELDS, simulate_frozen_model
 
 
@@ -102,7 +101,6 @@ def _run_scenario(
     *,
     emit_diagnostics: bool,
     seed: Optional[int],
-    use_tutorial_surrogate: bool,
 ) -> Tuple[Dict[str, Path], pd.DataFrame, pd.DataFrame]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -113,28 +111,21 @@ def _run_scenario(
 
     events_path = output_dir / f"events_{scenario.name}_python.csv"
 
-    if use_tutorial_surrogate:
-        surrogate = simulate_tutorial(scenario.parameters, therapy=scenario.therapy, days=scenario.stop_time)
-        surrogate_frame = surrogate.to_frame()
-        if emit_diagnostics:
-            empty_log = pd.DataFrame(columns=["scenario", *EVENT_LOG_FIELDS])
-            empty_log.to_csv(events_path, index=False)
-    else:
-        candidate_events: Optional[List[Dict[str, object]]] = [] if emit_diagnostics else None
-        result = simulate_frozen_model(
-            scenario.snapshot,
-            days=scenario.stop_time,
-            therapy=scenario.therapy,
-            seed=seed,
-            emit_diagnostics=emit_diagnostics,
-            run_label=scenario.name,
-            event_log=candidate_events,
-        )
-        surrogate_frame = result.to_frame()
-        if emit_diagnostics:
-            events_df = pd.DataFrame(candidate_events or [], columns=EVENT_LOG_FIELDS)
-            events_df.insert(0, "scenario", scenario.name)
-            events_df.to_csv(events_path, index=False)
+    candidate_events: Optional[List[Dict[str, object]]] = [] if emit_diagnostics else None
+    result = simulate_frozen_model(
+        scenario.snapshot,
+        days=scenario.stop_time,
+        therapy=scenario.therapy,
+        seed=seed,
+        emit_diagnostics=emit_diagnostics,
+        run_label=scenario.name,
+        event_log=candidate_events,
+    )
+    surrogate_frame = result.to_frame()
+    if emit_diagnostics:
+        events_df = pd.DataFrame(candidate_events or [], columns=EVENT_LOG_FIELDS)
+        events_df.insert(0, "scenario", scenario.name)
+        events_df.to_csv(events_path, index=False)
 
     surrogate_path = output_dir / f"{scenario.name}_surrogate.csv"
     surrogate_frame.to_csv(surrogate_path, index=False)
@@ -149,7 +140,7 @@ def _performance_benchmark(parameters: Tuple[Path, ...], replicates: int) -> Dic
 
     start = time.perf_counter()
     for _ in range(replicates):
-        simulate_tutorial(parameters, therapy="anti_pd1")
+        simulate_frozen_model("example1", days=400.0, therapy="anti_pd1")
     sur_time = time.perf_counter() - start
 
     return {
@@ -206,7 +197,6 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     parser.add_argument("--seed", type=int, default=42, help="Deterministic seed propagated to simulations")
     parser.add_argument("--emit-diagnostics", action="store_true", help="Emit solver/banner diagnostics and error tables")
-    parser.add_argument("--use-tutorial-surrogate", action="store_true", help="Compare against the reduced tutorial surrogate instead of the frozen snapshot")
     scenario_choices = sorted(SCENARIO_REGISTRY.keys())
     parser.add_argument(
         "--scenarios",
@@ -240,7 +230,6 @@ def main(argv: Iterable[str] | None = None) -> int:
             args.output,
             emit_diagnostics=args.emit_diagnostics,
             seed=args.seed,
-            use_tutorial_surrogate=args.use_tutorial_surrogate,
         )
         results.append({"scenario": scenario.name, **paths})
 

@@ -1,4 +1,4 @@
-"""Load and simulate SimBiology tutorial snapshots without MATLAB."""
+"""Load and simulate frozen SimBiology snapshots without MATLAB."""
 
 from __future__ import annotations
 
@@ -17,8 +17,6 @@ import numpy as np
 import pandas as pd
 from scipy.integrate import solve_ivp
 import sympy as sp
-
-from .tutorial_sim import ScenarioResult
 
 SAFE_GLOBALS = {
     "__builtins__": None,
@@ -53,6 +51,34 @@ EVENT_LOG_FIELDS = (
 _TIME_TOL = 1e-9
 _T0_REL_TOL = 1e-9
 _T0_ABS_TOL = 1e-12
+
+
+@dataclass(frozen=True)
+class ScenarioResult:
+    """Container describing the output of a frozen snapshot simulation."""
+
+    time_days: np.ndarray
+    cancer_cells: np.ndarray
+    dead_cells: np.ndarray
+    t_cells: np.ndarray
+    tumour_volume_l: np.ndarray
+    tumour_diameter_cm: np.ndarray
+    pd1_occupancy: np.ndarray
+    tcell_density_per_ul: np.ndarray
+
+    def to_frame(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "time_days": self.time_days,
+                "cancer_cells": self.cancer_cells,
+                "dead_cells": self.dead_cells,
+                "t_cells": self.t_cells,
+                "tumour_volume_l": self.tumour_volume_l,
+                "tumour_diameter_cm": self.tumour_diameter_cm,
+                "pd1_occupancy": self.pd1_occupancy,
+                "tcell_density_per_ul": self.tcell_density_per_ul,
+            }
+        )
 
 
 @dataclass(frozen=True)

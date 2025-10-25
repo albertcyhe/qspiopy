@@ -1,6 +1,6 @@
 # Frozen SimBiology Execution Semantics
 
-This document captures the Python runtime rules that mirror MATLAB SimBiology for the frozen tutorial snapshots.
+This document captures the Python runtime rules that mirror MATLAB SimBiology for the frozen snapshots exported by `export_matlab_snapshot.m`.
 
 ## Snapshot Contract
 

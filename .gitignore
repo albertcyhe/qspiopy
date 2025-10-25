@@ -18,3 +18,6 @@ artifacts/validation/reference_alignment.csv
 
 # Virtual environments
 .venv/
+
+# Local MATLAB assets
+matlab/
