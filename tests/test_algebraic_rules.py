@@ -53,6 +53,9 @@ def test_algebraic_rule_solves_non_linear_equation():
         dynamic_indices={"A": 0},
         repeated_assignment_order=[],
         initial_assignment_rules=[],
+        time_unit="day",
+        solver_type="BDF",
+        provenance={},
     )
 
     context = {"B": 8.0}

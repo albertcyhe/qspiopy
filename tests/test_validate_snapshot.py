@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from scripts.validate_snapshot import validate_snapshot
+from src.offline.snapshot import load_frozen_model
 
 
 def test_validate_snapshot_example_pass():
@@ -23,3 +24,9 @@ def test_validate_snapshot_detects_invalid_species(tmp_path):
     with pytest.raises(SystemExit) as excinfo:
         validate_snapshot(dst)
     assert "interpreted_dimension" in str(excinfo.value)
+
+
+def test_load_frozen_model_accepts_directory_path():
+    path = Path("artifacts/matlab_frozen_model/example1")
+    model = load_frozen_model(path)
+    assert model.name == path.name

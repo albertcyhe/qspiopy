@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import heapq
+import json
 import logging
 import math
-from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Protocol
 
 import numpy as np
 import pandas as pd
 from scipy.integrate import solve_ivp
 
-from .entities import DoseEntry, EventEntry, ScenarioResult, ScheduledDose
-from .snapshot import FrozenModel, load_frozen_model, sha256_file, snapshot_digest
+from .entities import BASE_HEADER, DoseEntry, EventEntry, ScenarioResult, ScheduledDose, SEMANTICS_VERSION
+from .errors import AlignmentFail, ConfigError, NumericsError, SnapshotError
+from .snapshot import FrozenModel, load_frozen_model
 
-SEMANTICS_VERSION = "0.9.0"
+logger = logging.getLogger(__name__)
 
 EVENT_LOG_FIELDS = (
     "event_index",
@@ -33,6 +34,81 @@ _T0_REL_TOL = 1e-9
 _T0_ABS_TOL = 1e-12
 
 
+class ExtraOutputs(Protocol):
+    """Callable extension point for computing derived outputs."""
+
+    name: str
+
+    def compute(
+        self,
+        time_days: np.ndarray,
+        states: np.ndarray,
+        contexts: Sequence[Mapping[str, float]],
+        meta: Mapping[str, object],
+    ) -> Mapping[str, np.ndarray]:
+        ...
+
+
+class DoseScheduler(Protocol):
+    """Strategy for generating scheduled doses."""
+
+    def build(
+        self,
+        base_doses: List[DoseEntry],
+        *,
+        model: FrozenModel,
+        days: float,
+    ) -> Iterable[ScheduledDose]:
+        ...
+
+
+@dataclass(frozen=True)
+class SolverConfig:
+    """Configuration driving scipy's solve_ivp."""
+
+    method: str
+    rtol: float
+    atol: float
+    max_step: float
+    seed: Optional[int]
+
+    def as_dict(self) -> Dict[str, object]:
+        return {
+            "method": self.method,
+            "rtol": self.rtol,
+            "atol": self.atol,
+            "max_step": self.max_step,
+            "seed": self.seed,
+        }
+
+    def identity(self) -> str:
+        payload = json.dumps(self.as_dict(), sort_keys=True)
+        return hashlib.sha256(payload.encode("utf8")).hexdigest()
+
+
+@dataclass
+class ContextKeyOutputs:
+    """Adapter for legacy context-key extraction."""
+
+    mapping: Mapping[str, str]
+
+    @property
+    def name(self) -> str:
+        return "context_keys"
+
+    def compute(
+        self,
+        time_days: np.ndarray,
+        states: np.ndarray,
+        contexts: Sequence[Mapping[str, float]],
+        meta: Mapping[str, object],
+    ) -> Mapping[str, np.ndarray]:
+        results: Dict[str, np.ndarray] = {}
+        for column, key in self.mapping.items():
+            results[column] = np.array([ctx.get(key, 0.0) for ctx in contexts], dtype=float)
+        return results
+
+
 @dataclass(frozen=True, order=True)
 class ScheduledEvent:
     time: float
@@ -41,11 +117,6 @@ class ScheduledEvent:
     trigger_time: float = field(compare=False)
     delay: float = field(compare=False)
     assignments: str = field(compare=False)
-
-
-# --------------------------------------------------------------------------------------
-# Dosing helpers
-# --------------------------------------------------------------------------------------
 
 
 def _enumerate_dose_times(dose: DoseEntry, days: float) -> List[float]:
@@ -85,31 +156,13 @@ def _fallback_anti_pd1_doses(model: FrozenModel, days: float) -> List[ScheduledD
     return schedule
 
 
-def _build_scheduled_doses(
-    model: FrozenModel,
-    therapy: str,
-    days: float,
-    *,
-    custom_doses: Optional[Sequence[DoseEntry]] = None,
-) -> List[ScheduledDose]:
-    therapy_flag = therapy.lower()
-    scheduled: List[ScheduledDose] = []
-    if custom_doses is not None:
-        base_doses = list(custom_doses)
-    else:
-        base_doses = [] if therapy_flag == "none" else list(model.doses)
-    for dose in base_doses:
+def _materialise_schedule(doses: Sequence[DoseEntry], days: float) -> List[ScheduledDose]:
+    schedule: List[ScheduledDose] = []
+    for dose in doses:
         for time_point in _enumerate_dose_times(dose, days):
-            scheduled.append(ScheduledDose(time=time_point, priority=dose.index, dose=dose, amount=dose.amount))
-    if not scheduled and therapy_flag == "anti_pd1" and custom_doses is None:
-        scheduled.extend(_fallback_anti_pd1_doses(model, days))
-    scheduled.sort(key=lambda item: (item.time, item.priority))
-    return scheduled
-
-
-# --------------------------------------------------------------------------------------
-# Sampling + diagnostics
-# --------------------------------------------------------------------------------------
+            schedule.append(ScheduledDose(time=time_point, priority=dose.index, dose=dose, amount=dose.amount))
+    schedule.sort(key=lambda item: (item.time, item.priority))
+    return schedule
 
 
 def _record_solution_samples(
@@ -186,41 +239,74 @@ def _perform_t0_quick_check(model: FrozenModel, state: np.ndarray, context: Dict
                     continue
                 reference_values[name] = float(raw_ref)
 
-    rows: List[Dict[str, float]] = []
     failures: List[Tuple[str, float, float, float]] = []
     for name, python_value in sorted(evaluation.items()):
         ref_value = reference_values.get(name)
         python_float = float(python_value)
         if ref_value is None:
-            rel_err = float("nan")
-        else:
-            abs_err = abs(python_float - ref_value)
-            rel_err = abs_err / max(abs(ref_value), _T0_ABS_TOL)
-            if abs_err > (_T0_ABS_TOL + _T0_REL_TOL * abs(ref_value)):
-                failures.append((name, python_float, ref_value, abs_err))
-        rows.append(
-            {
-                "name": name,
-                "python_value": python_float,
-                "reference_value": ref_value if ref_value is not None else np.nan,
-                "rel_err": rel_err,
-            }
-        )
+            continue
+        abs_err = abs(python_float - ref_value)
+        if abs_err > (_T0_ABS_TOL + _T0_REL_TOL * abs(ref_value)):
+            failures.append((name, python_float, ref_value, abs_err))
 
-    output_path = model.source_dir / "equations_eval_t0.csv"
-    try:
-        pd.DataFrame(rows).to_csv(output_path, index=False)
-    except OSError:
-        pass
-
-    if reference_values and failures:
+    if failures:
         details = ", ".join(f"{name} Δ={abs_err:.2e}" for name, _, _, abs_err in failures[:5])
-        raise RuntimeError(f"t=0 quick check failed for snapshot '{model.name}': {details}")
+        raise AlignmentFail(f"t=0 quick check failed for snapshot '{model.name}': {details}")
 
 
-# --------------------------------------------------------------------------------------
-# Public simulation entry point
-# --------------------------------------------------------------------------------------
+def _sample_times(days: float, interval_hours: Optional[float]) -> np.ndarray:
+    tol = 1e-12
+    if interval_hours is None:
+        last_complete_day = int(math.floor(days + tol))
+        times = np.arange(0, last_complete_day + 1, dtype=float)
+        if abs(days - float(last_complete_day)) > tol:
+            times = np.append(times, days)
+        elif times[-1] != days:
+            times = np.append(times, days)
+        return np.unique(np.round(times, 12))
+    step_days = float(interval_hours) / 24.0
+    if step_days <= tol:
+        step_days = tol
+    max_steps = int(math.floor((days + tol) / step_days))
+    times = np.arange(0.0, (max_steps + 1) * step_days + tol, step_days)
+    times = np.round(times, 12)
+    if not np.isclose(times[0], 0.0, atol=tol):
+        times = np.concatenate(([0.0], times))
+    if times[-1] < days - tol:
+        times = np.append(times, round(days, 12))
+    else:
+        times[-1] = round(days, 12)
+    return np.unique(times)
+
+
+def _log_solver_banner(model: FrozenModel, solver: SolverConfig, days: float, emit: bool) -> None:
+    if not emit:
+        return
+    meta = {
+        "solver": solver.method,
+        "rtol": solver.rtol,
+        "atol": solver.atol,
+        "max_step": solver.max_step,
+        "seed": solver.seed,
+        "time_unit": model.time_unit,
+        "stop_time": days,
+    }
+    logger.info("solver_config %s", json.dumps(meta, sort_keys=True))
+    logger.info("provenance %s", json.dumps(model.provenance, sort_keys=True))
+
+
+def _time_unit_sniff(model: FrozenModel, interval_hours: Optional[float]) -> None:
+    if interval_hours is None:
+        return
+    unit = model.time_unit.lower()
+    if unit.startswith("day"):
+        if abs(interval_hours - 1.0) < 1e-9:
+            logger.warning("sampling_interval hours=1 while model time unit is days; verify unit alignment")
+        if abs(interval_hours - 24.0) < 1e-9:
+            logger.warning("sampling_interval hours=24 while model time unit is days; test for hour/day confusion")
+    if unit.startswith("hour"):
+        if abs(interval_hours - 24.0) < 1e-9 or abs(interval_hours - (1.0 / 24.0)) < 1e-9:
+            logger.warning("hour-based model with interval %.6g may indicate day/hour mismatch", interval_hours)
 
 
 def simulate_frozen_model(
@@ -235,19 +321,21 @@ def simulate_frozen_model(
     rtol_override: Optional[float] = None,
     atol_override: Optional[float] = None,
     sample_interval_hours: Optional[float] = 24.0,
-    extra_outputs: Optional[Mapping[str, str]] = None,
+    extra_outputs: Optional[Sequence[ExtraOutputs]] = None,
+    scheduler: Optional[DoseScheduler] = None,
     custom_doses: Optional[Sequence[DoseEntry]] = None,
+    context_outputs: Optional[Mapping[str, str]] = None,
 ) -> ScenarioResult:
-    model = load_frozen_model(snapshot)
-    state = model.initial_state().astype(float)
-    model.apply_initial_assignments_to_state(state)
+    try:
+        model = load_frozen_model(snapshot)
+    except FileNotFoundError as exc:  # pragma: no cover - passthrough
+        raise SnapshotError(str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        raise SnapshotError(f"Failed to load snapshot '{snapshot}': {exc}") from exc
 
-    if event_log is not None:
-        event_log.clear()
-
-    solver_options = model.config.get("SolverOptions", {})
-    rel_tol = solver_options.get("RelativeTolerance", 1e-7)
-    abs_tol = solver_options.get("AbsoluteTolerance", 1e-10)
+    solver_options = model.config.get("SolverOptions", {}) or {}
+    rel_tol = rtol_override if rtol_override is not None else solver_options.get("RelativeTolerance", 1e-7)
+    abs_tol = atol_override if atol_override is not None else solver_options.get("AbsoluteTolerance", 1e-10)
     max_step_value = solver_options.get("MaxStep", None)
     if isinstance(max_step_value, (list, tuple)) and len(max_step_value) == 0:
         max_step_value = None
@@ -255,67 +343,36 @@ def simulate_frozen_model(
     if max_step == 0:
         max_step = np.inf
 
-    if emit_diagnostics:
-        logger = logging.getLogger(__name__)
-        time_units = model.config.get("TimeUnits", "day")
-        method = model.config.get("SolverType", "BDF")
-        max_step_display = "inf" if not math.isfinite(max_step) else f"{max_step:g}"
-        equations_path = model.source_dir / "equations.txt"
-        config_path = model.source_dir / "configset.json"
-        snapshot_sha = snapshot_digest(model.source_dir)
-        equations_sha = sha256_file(equations_path) if equations_path.exists() else "NA"
-        config_sha = sha256_file(config_path) if config_path.exists() else "NA"
-        banner_label = run_label or snapshot
-        logger.info(
-            "solver=%s rtol=%g atol=%g max_step=%s time_units=%s seed=%s run=%s therapy=%s stop_time=%s",
-            method,
-            rel_tol,
-            abs_tol,
-            max_step_display,
-            time_units,
-            seed,
-            banner_label,
-            therapy,
-            days,
-        )
-        logger.info(
-            "semantics=%s snapshot_sha=%s equations_sha=%s configset_sha=%s",
-            SEMANTICS_VERSION,
-            snapshot_sha,
-            equations_sha,
-            config_sha,
-        )
+    def _map_solver_type(label: str) -> str:
+        lower = label.lower()
+        if lower in {"ode15s", "ode23s"}:
+            return "BDF"
+        if lower == "ode45":
+            return "RK45"
+        if lower == "ode113":
+            return "DOP853"
+        return label.upper()
 
-    if rtol_override is not None:
-        rel_tol = rtol_override
-    if atol_override is not None:
-        abs_tol = atol_override
+    solver_config = SolverConfig(
+        method=_map_solver_type(str(model.config.get("SolverType", "BDF") or "BDF")),
+        rtol=float(rel_tol),
+        atol=float(abs_tol),
+        max_step=float(max_step),
+        seed=seed,
+    )
+    _log_solver_banner(model, solver_config, days, emit_diagnostics)
+    _time_unit_sniff(model, sample_interval_hours)
 
-    def _build_sample_times(stop_time: float, interval_hours: Optional[float]) -> np.ndarray:
-        tol = 1e-12
-        if interval_hours is None:
-            last_complete_day = int(math.floor(stop_time + tol))
-            times = np.arange(0, last_complete_day + 1, dtype=float)
-            if abs(stop_time - float(last_complete_day)) > tol:
-                times = np.append(times, stop_time)
-            elif times[-1] != stop_time:
-                times = np.append(times, stop_time)
-            return np.unique(np.round(times, 12))
-        step_days = float(interval_hours) / 24.0
-        if step_days <= tol:
-            step_days = tol
-        max_steps = int(math.floor((stop_time + tol) / step_days))
-        times = np.arange(0.0, (max_steps + 1) * step_days + tol, step_days)
-        times = np.round(times, 12)
-        if not np.isclose(times[0], 0.0, atol=tol):
-            times = np.concatenate(([0.0], times))
-        if times[-1] < stop_time - tol:
-            times = np.append(times, round(stop_time, 12))
-        else:
-            times[-1] = round(stop_time, 12)
-        return np.unique(times)
+    if seed is not None:
+        np.random.seed(seed)
 
-    sample_times = _build_sample_times(days, sample_interval_hours)
+    state = model.initial_state().astype(float)
+    model.apply_initial_assignments_to_state(state)
+
+    if event_log is not None:
+        event_log.clear()
+
+    sample_times = _sample_times(days, sample_interval_hours)
     tol_time = _TIME_TOL
 
     def reconcile(vec: np.ndarray) -> Dict[str, float]:
@@ -325,19 +382,26 @@ def simulate_frozen_model(
         model.sync_state_from_context(ctx, vec)
         return ctx
 
-    def record_sample(samples: Dict[float, np.ndarray], time: float, vec: np.ndarray) -> None:
-        for target in sample_times:
-            if abs(time - target) <= tol_time:
-                samples[target] = vec.copy()
-                break
-
     context = reconcile(state)
     _perform_t0_quick_check(model, state, context)
 
     samples: Dict[float, np.ndarray] = {}
-    record_sample(samples, 0.0, state)
+    samples[0.0] = state.copy()
 
-    scheduled_doses = _build_scheduled_doses(model, therapy, days, custom_doses=custom_doses)
+    therapy_flag = therapy.lower()
+    base_doses = list(custom_doses) if custom_doses is not None else (
+        [] if therapy_flag == "none" else list(model.doses)
+    )
+
+    if scheduler is not None:
+        scheduled_list = list(scheduler.build(base_doses, model=model, days=days))
+    else:
+        scheduled_list = _materialise_schedule(base_doses, days)
+
+    if not scheduled_list and therapy_flag == "anti_pd1" and custom_doses is None:
+        scheduled_list.extend(_fallback_anti_pd1_doses(model, days))
+
+    scheduled_list.sort(key=lambda item: (item.time, item.priority))
     dose_index = 0
     pending_events: List[ScheduledEvent] = []
 
@@ -354,21 +418,26 @@ def simulate_frozen_model(
         return fn
 
     event_functions = [make_event_function(entry) for entry in model.events]
-
     current_state = state
     context = reconcile(current_state)
 
-    while dose_index < len(scheduled_doses) and abs(scheduled_doses[dose_index].time) <= tol_time:
-        scheduled_dose = scheduled_doses[dose_index]
+    while dose_index < len(scheduled_list) and abs(scheduled_list[dose_index].time) <= tol_time:
+        scheduled_dose = scheduled_list[dose_index]
         model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
         context = reconcile(current_state)
-        record_sample(samples, 0.0, current_state)
+        samples[0.0] = current_state.copy()
+        logger.info(
+            "dose_event time=%g target=%s amount=%g",
+            scheduled_dose.time,
+            scheduled_dose.dose.target,
+            scheduled_dose.amount,
+        )
         dose_index += 1
 
     current_time = 0.0
 
     while current_time < days - tol_time:
-        next_dose_time = scheduled_doses[dose_index].time if dose_index < len(scheduled_doses) else float("inf")
+        next_dose_time = scheduled_list[dose_index].time if dose_index < len(scheduled_list) else float("inf")
         next_event_time = pending_events[0].time if pending_events else float("inf")
         target_time = min(days, next_dose_time, next_event_time)
 
@@ -380,12 +449,18 @@ def simulate_frozen_model(
                     value = assignment.compiled.evaluate(context) if assignment.compiled is not None else 0.0
                     model._apply_target_value(assignment.target, value, context, current_state)
                 context = reconcile(current_state)
-                record_sample(samples, current_time, current_state)
-            while dose_index < len(scheduled_doses) and scheduled_doses[dose_index].time <= current_time + tol_time:
-                scheduled_dose = scheduled_doses[dose_index]
+                samples[current_time] = current_state.copy()
+            while dose_index < len(scheduled_list) and scheduled_list[dose_index].time <= current_time + tol_time:
+                scheduled_dose = scheduled_list[dose_index]
                 model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
                 context = reconcile(current_state)
-                record_sample(samples, current_time, current_state)
+                samples[current_time] = current_state.copy()
+                logger.info(
+                    "dose_event time=%g target=%s amount=%g",
+                    scheduled_dose.time,
+                    scheduled_dose.dose.target,
+                    scheduled_dose.amount,
+                )
                 dose_index += 1
             continue
 
@@ -393,17 +468,17 @@ def simulate_frozen_model(
             model.rhs,
             (current_time, target_time),
             current_state,
-            method="BDF",
-            rtol=rel_tol,
-            atol=abs_tol,
-            max_step=max_step,
+            method=solver_config.method,
+            rtol=solver_config.rtol,
+            atol=solver_config.atol,
+            max_step=solver_config.max_step,
             dense_output=True,
             events=event_functions if event_functions else None,
             vectorized=False,
         )
 
-        if not sol.success:  # pragma: no cover
-            raise RuntimeError(f"Integration failed at t={current_time}: {sol.message}")
+        if not sol.success:
+            raise NumericsError(f"Integration failed at t={current_time}: {sol.message}")
 
         triggered_pairs: List[Tuple[float, EventEntry]] = []
         if sol.t_events and event_functions:
@@ -456,7 +531,7 @@ def simulate_frozen_model(
                     value = assignment.compiled.evaluate(context) if assignment.compiled is not None else 0.0
                     model._apply_target_value(assignment.target, value, context, current_state)
                 context = reconcile(current_state)
-            record_sample(samples, event_time, current_state)
+            samples[event_time] = current_state.copy()
             current_time = event_time
         else:
             t_end = float(sol.t[-1])
@@ -482,16 +557,23 @@ def simulate_frozen_model(
                 value = assignment.compiled.evaluate(context) if assignment.compiled is not None else 0.0
                 model._apply_target_value(assignment.target, value, context, current_state)
             context = reconcile(current_state)
-            record_sample(samples, current_time, current_state)
+            samples[current_time] = current_state.copy()
 
-        while dose_index < len(scheduled_doses) and scheduled_doses[dose_index].time <= current_time + tol_time:
-            scheduled_dose = scheduled_doses[dose_index]
+        while dose_index < len(scheduled_list) and scheduled_list[dose_index].time <= current_time + tol_time:
+            scheduled_dose = scheduled_list[dose_index]
             model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
             context = reconcile(current_state)
-            record_sample(samples, current_time, current_state)
+            samples[current_time] = current_state.copy()
+            logger.info(
+                "dose_event time=%g target=%s amount=%g",
+                scheduled_dose.time,
+                scheduled_dose.dose.target,
+                scheduled_dose.amount,
+            )
             dose_index += 1
 
-    record_sample(samples, current_time, current_state)
+    if current_time not in samples:
+        samples[current_time] = current_state.copy()
 
     output_states = []
     last_state = current_state.copy()
@@ -508,25 +590,25 @@ def simulate_frozen_model(
     tumour_diameter_cm = []
     pd1_occupancy = []
     tcell_density = []
-    extra_columns = extra_outputs or {}
-    extras_accumulators: Dict[str, List[float]] = {name: [] for name in extra_columns}
+    contexts: List[Dict[str, float]] = []
 
     for vector in states:
         vec = vector.copy()
-        context = model.build_context_from_state(vec)
-        model.evaluate_repeated_assignments(context)
-        model.apply_algebraic_rules(context, vec, mutate=False)
-        model.sync_state_from_context(context, vec)
+        ctx = model.build_context_from_state(vec)
+        model.evaluate_repeated_assignments(ctx)
+        model.apply_algebraic_rules(ctx, vec, mutate=False)
+        model.sync_state_from_context(ctx, vec)
+        contexts.append(dict(ctx))
 
-        c_cells = context.get("C1", 0.0)
-        d_cells = context.get("C_x", 0.0)
-        t_tumour = context.get("V_T.T1", 0.0)
-        tumour_t0 = context.get("V_T.T0", 0.0)
-        volume_l = context.get("V_T", 0.0)
+        c_cells = ctx.get("C1", 0.0)
+        d_cells = ctx.get("C_x", 0.0)
+        t_tumour = ctx.get("V_T.T1", 0.0)
+        tumour_t0 = ctx.get("V_T.T0", 0.0)
+        volume_l = ctx.get("V_T", 0.0)
         diameter_cm = ((3.0 * volume_l * 1e3) / (4.0 * math.pi)) ** (1.0 / 3.0) * 2.0 if volume_l > 0 else 0.0
-        occupancy = context.get("H_PD1_C1", 0.0)
+        occupancy = ctx.get("H_PD1_C1", 0.0)
         density = t_tumour / max(volume_l * 1e6, 1e-12)
-        t_total = context.get("T_total", t_tumour + tumour_t0)
+        t_total = ctx.get("T_total", t_tumour + tumour_t0)
 
         cancer_cells.append(c_cells)
         dead_cells.append(d_cells)
@@ -535,12 +617,38 @@ def simulate_frozen_model(
         tumour_diameter_cm.append(diameter_cm)
         pd1_occupancy.append(occupancy)
         tcell_density.append(density)
-        for column, context_key in extra_columns.items():
-            extras_accumulators[column].append(float(context.get(context_key, 0.0)))
 
-    extras_arrays = {
-        column: np.array(values, dtype=float) for column, values in extras_accumulators.items()
-    }
+    extras_results: Dict[str, np.ndarray] = {}
+    extra_order: List[str] = []
+
+    plugin_sequence: List[ExtraOutputs] = []
+    if context_outputs:
+        plugin_sequence.append(ContextKeyOutputs(context_outputs))
+    if extra_outputs:
+        plugin_sequence.extend(extra_outputs)
+
+    if plugin_sequence:
+        meta: Dict[str, object] = {
+            "solver": solver_config.as_dict(),
+            "provenance": model.provenance,
+            "time_unit": model.time_unit,
+        }
+        for plugin in plugin_sequence:
+            payload = plugin.compute(sample_times, states, contexts, meta)
+            for column, values in payload.items():
+                extras_results[column] = np.asarray(values, dtype=float)
+                extra_order.append(column)
+
+    header = BASE_HEADER + tuple(extra_order)
+
+    provenance = dict(model.provenance)
+    provenance.update(
+        {
+            "solver_config": json.dumps(solver_config.as_dict(), sort_keys=True),
+            "solver_hash": solver_config.identity(),
+            "run_label": run_label or "",
+        }
+    )
 
     return ScenarioResult(
         time_days=sample_times,
@@ -551,5 +659,8 @@ def simulate_frozen_model(
         tumour_diameter_cm=np.array(tumour_diameter_cm, dtype=float),
         pd1_occupancy=np.array(pd1_occupancy, dtype=float),
         tcell_density_per_ul=np.array(tcell_density, dtype=float),
-        extras=extras_arrays,
+        extras=extras_results,
+        header=header,
+        provenance=provenance,
+        semantics_version=SEMANTICS_VERSION,
     )

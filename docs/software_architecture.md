@@ -42,25 +42,50 @@ Responsible for translating a frozen snapshot directory into a `FrozenModel` ins
   - Evaluating rules and reactions.
   - Applying doses and synchronising state vectors.
 
+`load_frozen_model` accepts either a snapshot name (resolved under
+`artifacts/matlab_frozen_model/` by default) or an explicit directory path. A
+valid snapshot directory must contain the following files:
+
+- `configset.json`
+- `equations.txt`
+- `species.csv`
+- `parameters.csv`
+- `compartments.csv`
+- `rules.csv`
+- `reactions.csv`
+- `events.csv`
+- `doses.csv`
+- `stoichiometry.csv`
+
+Optional artefacts such as `variants.csv` or `equations_eval_t0_reference.csv`
+will be used automatically when available. Provenance metadata (snapshot SHA,
+SymPy version, solver type, unit map) is persisted on `FrozenModel` and carried
+through to every `ScenarioResult`.
+
 All filesystem interaction is concentrated here; higher layers treat `FrozenModel` as an immutable runtime description.
 
 ### `simulation.py`
 
 Hosts the numerical runtime that turns a `FrozenModel` into trajectories:
 
-- Constants (`SEMANTICS_VERSION`, solver tolerances, event log schema).
-- Dosing utilities (`_enumerate_dose_times`, `_build_scheduled_doses`), including injectable custom dosing.
-- Diagnostics (`_perform_t0_quick_check`) and sampling helpers.
-- `simulate_frozen_model(...)` – the public entry point used by CLI tools/tests. It handles:
-  - Solver configuration (tolerances, step sizes, seed banners).
+- Constants (`SEMANTICS_VERSION`, event log schema) mirrored from `entities.py`.
+- Dosing utilities plus the `DoseScheduler` protocol so future scheduling strategies can be injected without touching the core loop.
+- Diagnostics (`_perform_t0_quick_check`) and sampling helpers with unit/time sniffing.
+- `simulate_frozen_model(...)` — the public entry point used by CLI tools/tests. It handles:
+  - `SolverConfig` capture (method/rtol/atol/max step/seed) with provenance hashing.
+  - Structured logging of solver/dose events and runtime warnings.
   - Event integration (immediate/delayed queue handling).
-  - Output sampling on configurable grids and optional extra observables.
+  - Output sampling on configurable grids and pluggable `ExtraOutputs` providers (AUC, peak-time, etc.).
 
 The runtime consumes only the `FrozenModel` API, removing any CSV/JSON reload logic from this layer.
 
 ### `frozen_model.py`
 
 Kept as a façade for backwards compatibility. External callers (e.g. CLI scripts) continue to import `simulate_frozen_model` or `EVENT_LOG_FIELDS` from `src.offline.frozen_model` without change. Internally it simply re-exports definitions from the new modules.
+
+### `errors.py`
+
+Defines the typed exception hierarchy (`ConfigError`, `SnapshotError`, `NumericsError`, `AlignmentFail`) used by `simulation.py` and downstream tooling for clearer failure handling.
 
 ## Public API
 

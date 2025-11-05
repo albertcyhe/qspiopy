@@ -101,6 +101,92 @@ Generated under `plots/`:
 - `overlay_<scenario>_<observable>.png` — reference vs Python overlays for selected observables.
 - `convergence_<scenario>.png` — tolerance sweep (log–log) vs a tight baseline.
 
+Snapshot directory layout
+-------------------------
+
+`load_frozen_model` accepts either a snapshot name under the default
+`artifacts/matlab_frozen_model/` directory or an explicit path to a directory
+containing the frozen SimBiology export. Each snapshot folder must include at
+least the following files:
+
+- `configset.json`
+- `equations.txt`
+- `species.csv`
+- `parameters.csv`
+- `compartments.csv`
+- `rules.csv`
+- `reactions.csv`
+- `events.csv`
+- `doses.csv`
+- `stoichiometry.csv`
+
+Optional metadata such as `variants.csv`, `equations_eval_t0_reference.csv`, or
+diagnostic artefacts will be picked up automatically when present. Example:
+
+```python
+from pathlib import Path
+from src.offline import load_frozen_model
+
+snapshot_dir = Path("/data/qspio_snapshots/tumour_cohort_v2")
+model = load_frozen_model(snapshot_dir)
+```
+
+Minimal example
+----------------
+
+```python
+from pathlib import Path
+
+from src.offline import load_frozen_model, simulate_frozen_model, DoseEntry
+
+model = load_frozen_model("example1")
+custom_dose = DoseEntry(
+    index=9001,
+    name="one_off",
+    dose_type="RepeatDose",
+    target="V_C.nivolumab",
+    amount=200.0 / 1.436e8,
+    amount_units="mole",
+    start_time=0.0,
+    interval=1e9,
+    repeat_count=0,
+)
+result = simulate_frozen_model(
+    "example1",
+    days=28.0,
+    therapy="anti_pd1",
+    custom_doses=[custom_dose],
+    sample_interval_hours=12.0,
+)
+output_path = Path("artifacts/debug/example1_oneoff.csv")
+result.save_csv(output_path)
+print(result.to_frame(order="contract").tail())
+```
+
+Extra output plugin (AUC demo)
+------------------------------
+
+```python
+import numpy as np
+
+from src.offline.simulation import ExtraOutputs
+
+class AUCPlugin(ExtraOutputs):
+    name = "auc_pd1"
+
+    def compute(self, time_days, states, contexts, meta):
+        occupancy = np.array([ctx.get("H_PD1_C1", 0.0) for ctx in contexts])
+        auc = np.trapezoid(occupancy, time_days)
+        return {"pd1_auc": np.full_like(time_days, auc)}
+
+result = simulate_frozen_model(
+    "example1",
+    days=14.0,
+    therapy="anti_pd1",
+    extra_outputs=[AUCPlugin()],
+)
+```
+
 Programmatic use
 ----------------
 

@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from scripts.validate_surrogate import _compute_metrics
+from src.offline.entities import BASE_HEADER
 from src.offline.frozen_model import DoseEntry, simulate_frozen_model
 
 
@@ -105,23 +106,16 @@ def _serialize_doses_for_matlab(spec: ScenarioSpec) -> List[Dict[str, float | st
     return payload
 
 
-def _write_dataframe(df: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
-
-
-def _simulate_python(spec: ScenarioSpec, *, doses: List[DoseEntry]) -> pd.DataFrame:
+def _simulate_python(spec: ScenarioSpec, *, doses: List[DoseEntry]):
     result = simulate_frozen_model(
         spec.snapshot,
         days=spec.stop_time_days,
         therapy=spec.therapy,
         sample_interval_hours=spec.sample_interval_hours,
         custom_doses=doses,
-        extra_outputs=spec.extra_outputs,
+        context_outputs=spec.extra_outputs,
     )
-    frame = result.to_frame()
-    frame.insert(0, "scenario", spec.scenario_id)
-    return frame
+    return result
 
 
 def _call_matlab(matlab_cli: Path, repo_root: Path, config_path: Path, output_path: Path) -> None:
@@ -151,7 +145,14 @@ def _call_matlab(matlab_cli: Path, repo_root: Path, config_path: Path, output_pa
 
 
 def _load_frame(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path)
+    frame = pd.read_csv(path)
+    header_path = path.with_suffix(path.suffix + ".header.txt")
+    if header_path.exists():
+        ordered = [line.strip() for line in header_path.read_text(encoding="utf8").splitlines() if line.strip()]
+        ordered = [col for col in ordered if col in frame.columns]
+        remainder = [col for col in frame.columns if col not in ordered]
+        frame = frame[ordered + remainder]
+    return frame
 
 
 def _compare_frames(
@@ -319,9 +320,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for scenario_id in scenario_ids:
         spec = registry[scenario_id]
         dose_entries = _build_dose_entries(spec)
-        python_frame = _simulate_python(spec, doses=dose_entries)
+        result = _simulate_python(spec, doses=dose_entries)
         surrogate_path = output_dir / f"{spec.scenario_id}_surrogate.csv"
-        _write_dataframe(python_frame, surrogate_path)
+        result.save_csv(surrogate_path, order="contract", include_header_manifest=True)
+        surrogate_df = result.to_frame()
 
         reference_path = output_dir / f"{spec.scenario_id}_reference.csv"
         if not args.skip_matlab:
@@ -337,12 +339,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "doses": _serialize_doses_for_matlab(spec),
             }
             config_path = output_dir / f"{spec.scenario_id}_scenario.json"
-            config_path.write_text(json.dumps(config_payload, indent=2), encoding="utf8")
-            _call_matlab(args.matlab_cli, repo_root, config_path, reference_path)
+                config_path.write_text(json.dumps(config_payload, indent=2), encoding="utf8")
+                _call_matlab(args.matlab_cli, repo_root, config_path, reference_path)
 
         if reference_path.is_file():
-            surrogate = _load_frame(surrogate_path)
+            surrogate = surrogate_df.copy()
             reference = _load_frame(reference_path)
+            header = result.column_order()
+            for column in header:
+                if column not in reference.columns:
+                    reference[column] = np.nan
+            reference = reference[list(header) + [col for col in reference.columns if col not in header]]
             columns = [
                 "cancer_cells",
                 "dead_cells",
@@ -351,7 +358,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "tumour_diameter_cm",
                 "pd1_occupancy",
                 "tcell_density_per_ul",
-            ] + list(spec.extra_outputs.keys())
+            ] + [column for column in header if column not in BASE_HEADER]
             per_column = _compare_frames(surrogate, reference, columns)
             per_column.insert(0, "scenario", spec.scenario_id)
             metrics_records.extend(per_column.to_dict(orient="records"))

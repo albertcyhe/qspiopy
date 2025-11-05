@@ -3,11 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 import sympy as sp
+
+
+SEMANTICS_VERSION = "1.0"
+BASE_HEADER = (
+    "time_days",
+    "cancer_cells",
+    "dead_cells",
+    "t_cells",
+    "tumour_volume_l",
+    "tumour_diameter_cm",
+    "pd1_occupancy",
+    "tcell_density_per_ul",
+)
 
 
 @dataclass(frozen=True)
@@ -23,9 +37,21 @@ class ScenarioResult:
     pd1_occupancy: np.ndarray
     tcell_density_per_ul: np.ndarray
     extras: Dict[str, np.ndarray] = field(default_factory=dict)
+    semantics_version: str = SEMANTICS_VERSION
+    header: Tuple[str, ...] = field(default_factory=tuple)
+    provenance: Dict[str, str] = field(default_factory=dict)
 
-    def to_frame(self) -> pd.DataFrame:
-        data = {
+    def column_order(self) -> Tuple[str, ...]:
+        if self.header:
+            return self.header
+        extras = tuple(self.extras.keys())
+        return BASE_HEADER + extras
+
+    def to_frame(self, order: str = "contract") -> pd.DataFrame:
+        columns = self.column_order() if order == "contract" else tuple(
+            list(BASE_HEADER) + list(self.extras.keys())
+        )
+        data_map = {
             "time_days": self.time_days,
             "cancer_cells": self.cancer_cells,
             "dead_cells": self.dead_cells,
@@ -35,9 +61,27 @@ class ScenarioResult:
             "pd1_occupancy": self.pd1_occupancy,
             "tcell_density_per_ul": self.tcell_density_per_ul,
         }
-        for column, values in self.extras.items():
-            data[column] = values
-        return pd.DataFrame(data)
+        data_map.update(self.extras)
+        frame = pd.DataFrame({column: data_map[column] for column in columns})
+        frame.attrs["semantics_version"] = self.semantics_version
+        if self.provenance:
+            frame.attrs["provenance"] = self.provenance
+        return frame
+
+    def save_csv(
+        self,
+        path: Path,
+        *,
+        order: str = "contract",
+        include_header_manifest: bool = True,
+        **to_csv_kwargs,
+    ) -> None:
+        frame = self.to_frame(order=order)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frame.to_csv(path, index=False, **to_csv_kwargs)
+        if include_header_manifest:
+            manifest_path = path.with_suffix(path.suffix + ".header.txt")
+            manifest_path.write_text("\n".join(self.column_order()), encoding="utf8")
 
 
 @dataclass(frozen=True)

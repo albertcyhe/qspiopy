@@ -7,7 +7,7 @@ import json
 import math
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -23,6 +23,7 @@ from .entities import (
     RuleEntry,
     SpeciesEntry,
 )
+from .errors import SnapshotError
 
 
 class FrozenModel:
@@ -52,6 +53,9 @@ class FrozenModel:
         dynamic_indices: Dict[str, int],
         repeated_assignment_order: List[RuleEntry],
         initial_assignment_rules: List[RuleEntry],
+        time_unit: str,
+        solver_type: str,
+        provenance: Dict[str, str],
     ) -> None:
         self.name = name
         self.source_dir = source_dir
@@ -74,6 +78,9 @@ class FrozenModel:
         self.dynamic_indices = dynamic_indices
         self.repeated_assignment_order = repeated_assignment_order
         self.initial_assignment_rules = initial_assignment_rules
+        self.time_unit = time_unit
+        self.solver_type = solver_type
+        self.provenance = provenance
 
     # --- state/context manipulation -------------------------------------------------
 
@@ -802,9 +809,50 @@ def snapshot_digest(directory: Path) -> str:
     return digest.hexdigest()
 
 
+SnapshotSpecifier = Union[str, Path]
+
+REQUIRED_SNAPSHOT_FILES = [
+    "configset.json",
+    "equations.txt",
+    "species.csv",
+    "parameters.csv",
+    "compartments.csv",
+    "rules.csv",
+    "reactions.csv",
+    "events.csv",
+    "doses.csv",
+    "stoichiometry.csv",
+]
+
+
+def _resolve_snapshot_path(specifier: SnapshotSpecifier, root: Optional[Path]) -> Path:
+    if isinstance(specifier, Path):
+        candidate = specifier
+    else:
+        candidate = Path(specifier)
+    if candidate.is_dir():
+        return candidate
+    if candidate.exists() and not candidate.is_dir():
+        raise SnapshotError(f"Snapshot path '{candidate}' exists but is not a directory")
+    base_root = root if root is not None else Path("artifacts") / "matlab_frozen_model"
+    resolved = base_root / str(specifier)
+    if resolved.is_dir():
+        return resolved
+    raise SnapshotError(f"Snapshot directory {resolved} is missing. Run export_matlab_snapshot first.")
+
+
+def load_frozen_model(specifier: SnapshotSpecifier, *, root: Optional[Path] = None) -> FrozenModel:
+    model_dir = _resolve_snapshot_path(specifier, root).resolve()
+    return _load_frozen_model_cached(str(model_dir))
+
+
 @lru_cache(maxsize=None)
-def load_frozen_model(name: str, *, root: Path = Path("artifacts") / "matlab_frozen_model") -> FrozenModel:
-    model_dir = root / name
+def _load_frozen_model_cached(model_dir_str: str) -> FrozenModel:
+    model_dir = Path(model_dir_str)
+    name = model_dir.name
+    missing = [entry for entry in REQUIRED_SNAPSHOT_FILES if not (model_dir / entry).is_file()]
+    if missing:
+        raise SnapshotError(f"Snapshot '{model_dir}' is missing required files: {', '.join(missing)}")
     if not model_dir.is_dir():
         raise FileNotFoundError(f"Snapshot directory {model_dir} is missing. Run export_matlab_snapshot first.")
 
@@ -821,7 +869,11 @@ def load_frozen_model(name: str, *, root: Path = Path("artifacts") / "matlab_fro
     safe_names = {token: f"SYM_{index}" for index, token in enumerate(tokens_sorted)}
     reverse_safe = {safe: token for token, safe in safe_names.items()}
 
-    fluxes = _load_flux_expressions(model_dir / "equations.txt")
+    equations_path = model_dir / "equations.txt"
+    config_path = model_dir / "configset.json"
+    parameters_path = model_dir / "parameters.csv"
+
+    fluxes = _load_flux_expressions(equations_path)
 
     rules = _load_rules(model_dir / "rules.csv", tokens_sorted, safe_names, reverse_safe)
     reactions = _load_reactions(model_dir / "reactions.csv", tokens_sorted, safe_names, reverse_safe, fluxes)
@@ -851,6 +903,22 @@ def load_frozen_model(name: str, *, root: Path = Path("artifacts") / "matlab_fro
         rule for rule in rules if rule.rule_type.lower() in {"algebraic", "algebraicrule"} and rule.compiled is not None
     ]
 
+    time_unit = str(config.get("TimeUnits", "") or "")
+    solver_type = str(config.get("SolverType", "BDF") or "BDF")
+    species_units = {entry.identifier: entry.units for entry in species if entry.units}
+    provenance = {
+        "snapshot_name": name,
+        "snapshot_sha": snapshot_digest(model_dir),
+        "equations_sha": sha256_file(equations_path) if equations_path.exists() else "",
+        "config_sha": sha256_file(config_path) if config_path.exists() else "",
+        "parameters_sha": sha256_file(parameters_path) if parameters_path.exists() else "",
+        "time_unit": time_unit,
+        "solver_type": solver_type,
+        "sympy_version": sp.__version__,
+        "parser_flags": "default_v1",
+        "units_map": json.dumps(species_units, sort_keys=True),
+    }
+
     return FrozenModel(
         name=name,
         source_dir=model_dir,
@@ -873,4 +941,7 @@ def load_frozen_model(name: str, *, root: Path = Path("artifacts") / "matlab_fro
         dynamic_indices=dynamic_indices,
         repeated_assignment_order=repeated_order,
         initial_assignment_rules=initial_rules,
+        time_unit=time_unit,
+        solver_type=solver_type,
+        provenance=provenance,
     )
