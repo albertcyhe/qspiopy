@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -65,20 +65,22 @@ class ScenarioResult:
     tumour_diameter_cm: np.ndarray
     pd1_occupancy: np.ndarray
     tcell_density_per_ul: np.ndarray
+    extras: Dict[str, np.ndarray] = field(default_factory=dict)
 
     def to_frame(self) -> pd.DataFrame:
-        return pd.DataFrame(
-            {
-                "time_days": self.time_days,
-                "cancer_cells": self.cancer_cells,
-                "dead_cells": self.dead_cells,
-                "t_cells": self.t_cells,
-                "tumour_volume_l": self.tumour_volume_l,
-                "tumour_diameter_cm": self.tumour_diameter_cm,
-                "pd1_occupancy": self.pd1_occupancy,
-                "tcell_density_per_ul": self.tcell_density_per_ul,
-            }
-        )
+        data = {
+            "time_days": self.time_days,
+            "cancer_cells": self.cancer_cells,
+            "dead_cells": self.dead_cells,
+            "t_cells": self.t_cells,
+            "tumour_volume_l": self.tumour_volume_l,
+            "tumour_diameter_cm": self.tumour_diameter_cm,
+            "pd1_occupancy": self.pd1_occupancy,
+            "tcell_density_per_ul": self.tcell_density_per_ul,
+        }
+        for column, values in self.extras.items():
+            data[column] = values
+        return pd.DataFrame(data)
 
 
 @dataclass(frozen=True)
@@ -1047,14 +1049,23 @@ def _fallback_anti_pd1_doses(model: FrozenModel, days: float) -> List[ScheduledD
     return schedule
 
 
-def _build_scheduled_doses(model: FrozenModel, therapy: str, days: float) -> List[ScheduledDose]:
+def _build_scheduled_doses(
+    model: FrozenModel,
+    therapy: str,
+    days: float,
+    *,
+    custom_doses: Optional[Sequence[DoseEntry]] = None,
+) -> List[ScheduledDose]:
     therapy_flag = therapy.lower()
     scheduled: List[ScheduledDose] = []
-    base_doses = [] if therapy_flag == "none" else list(model.doses)
+    if custom_doses is not None:
+        base_doses = list(custom_doses)
+    else:
+        base_doses = [] if therapy_flag == "none" else list(model.doses)
     for dose in base_doses:
         for time_point in _enumerate_dose_times(dose, days):
             scheduled.append(ScheduledDose(time=time_point, priority=dose.index, dose=dose, amount=dose.amount))
-    if not scheduled and therapy_flag == "anti_pd1":
+    if not scheduled and therapy_flag == "anti_pd1" and custom_doses is None:
         scheduled.extend(_fallback_anti_pd1_doses(model, days))
     scheduled.sort(key=lambda item: (item.time, item.priority))
     return scheduled
@@ -1177,6 +1188,9 @@ def simulate_frozen_model(
     event_log: Optional[List[Dict[str, object]]] = None,
     rtol_override: Optional[float] = None,
     atol_override: Optional[float] = None,
+    sample_interval_hours: Optional[float] = 24.0,
+    extra_outputs: Optional[Mapping[str, str]] = None,
+    custom_doses: Optional[Sequence[DoseEntry]] = None,
 ) -> ScenarioResult:
     model = load_frozen_model(snapshot)
     state = model.initial_state().astype(float)
@@ -1231,7 +1245,34 @@ def simulate_frozen_model(
     if atol_override is not None:
         abs_tol = atol_override
 
-    sample_times = np.arange(0, int(days) + 1, dtype=float)
+    if sample_interval_hours is not None and sample_interval_hours <= 0:
+        raise ValueError("sample_interval_hours must be positive")
+
+    def _build_sample_times(stop_time: float, interval_hours: Optional[float]) -> np.ndarray:
+        tol = 1e-12
+        if interval_hours is None:
+            last_complete_day = int(math.floor(stop_time + tol))
+            times = np.arange(0, last_complete_day + 1, dtype=float)
+            if abs(stop_time - float(last_complete_day)) > tol:
+                times = np.append(times, stop_time)
+            elif times[-1] != stop_time:
+                times = np.append(times, stop_time)
+            return np.unique(np.round(times, 12))
+        step_days = float(interval_hours) / 24.0
+        if step_days <= tol:
+            step_days = tol
+        max_steps = int(math.floor((stop_time + tol) / step_days))
+        times = np.arange(0.0, (max_steps + 1) * step_days + tol, step_days)
+        times = np.round(times, 12)
+        if not np.isclose(times[0], 0.0, atol=tol):
+            times = np.concatenate(([0.0], times))
+        if times[-1] < stop_time - tol:
+            times = np.append(times, round(stop_time, 12))
+        else:
+            times[-1] = round(stop_time, 12)
+        return np.unique(times)
+
+    sample_times = _build_sample_times(days, sample_interval_hours)
     tol_time = _TIME_TOL
 
     def reconcile(vec: np.ndarray) -> Dict[str, float]:
@@ -1253,7 +1294,7 @@ def simulate_frozen_model(
     samples: Dict[float, np.ndarray] = {}
     record_sample(samples, 0.0, state)
 
-    scheduled_doses = _build_scheduled_doses(model, therapy, days)
+    scheduled_doses = _build_scheduled_doses(model, therapy, days, custom_doses=custom_doses)
     dose_index = 0
     pending_events: List[ScheduledEvent] = []
 
@@ -1425,6 +1466,8 @@ def simulate_frozen_model(
     tumour_diameter_cm = []
     pd1_occupancy = []
     tcell_density = []
+    extra_columns = extra_outputs or {}
+    extras_accumulators: Dict[str, List[float]] = {name: [] for name in extra_columns}
 
     for time_point, vector in zip(sample_times, states):
         vec = vector.copy()
@@ -1450,6 +1493,12 @@ def simulate_frozen_model(
         tumour_diameter_cm.append(diameter_cm)
         pd1_occupancy.append(occupancy)
         tcell_density.append(density)
+        for column, context_key in extra_columns.items():
+            extras_accumulators[column].append(float(context.get(context_key, 0.0)))
+
+    extras_arrays = {
+        column: np.array(values, dtype=float) for column, values in extras_accumulators.items()
+    }
 
     return ScenarioResult(
         time_days=sample_times,
@@ -1460,4 +1509,5 @@ def simulate_frozen_model(
         tumour_diameter_cm=np.array(tumour_diameter_cm, dtype=float),
         pd1_occupancy=np.array(pd1_occupancy, dtype=float),
         tcell_density_per_ul=np.array(tcell_density, dtype=float),
+        extras=extras_arrays,
     )
