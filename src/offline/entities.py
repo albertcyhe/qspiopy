@@ -185,6 +185,7 @@ class DoseEntry:
     rate: Optional[float] = None
     rate_units: str = ""
     duration: Optional[float] = None
+    amount_mg: Optional[float] = None
 
 
 @dataclass(frozen=True, order=True)
@@ -193,3 +194,4 @@ class ScheduledDose:
     priority: int
     dose: DoseEntry = field(compare=False)
     amount: float = field(compare=False)
+    amount_mg: Optional[float] = field(default=None, compare=False)

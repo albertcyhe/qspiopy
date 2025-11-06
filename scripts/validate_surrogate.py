@@ -5,15 +5,16 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-from src.offline.frozen_model import EVENT_LOG_FIELDS, simulate_frozen_model
+from src.offline.frozen_model import EVENT_LOG_FIELDS, load_frozen_model, simulate_frozen_model
 
 
 @dataclass
@@ -101,7 +102,9 @@ def _run_scenario(
     *,
     emit_diagnostics: bool,
     seed: Optional[int],
-) -> Tuple[Dict[str, Path], pd.DataFrame, pd.DataFrame]:
+    collect_events: bool,
+    dump_t0: bool,
+) -> Tuple[Dict[str, Path], pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     reference_path = output_dir / f"{scenario.name}_reference.csv"
@@ -111,7 +114,7 @@ def _run_scenario(
 
     events_path = output_dir / f"events_{scenario.name}_python.csv"
 
-    candidate_events: Optional[List[Dict[str, object]]] = [] if emit_diagnostics else None
+    candidate_events: Optional[List[Dict[str, object]]] = [] if (emit_diagnostics or collect_events) else None
     result = simulate_frozen_model(
         scenario.snapshot,
         days=scenario.stop_time,
@@ -122,15 +125,28 @@ def _run_scenario(
         event_log=candidate_events,
     )
     surrogate_frame = result.to_frame()
-    if emit_diagnostics:
-        events_df = pd.DataFrame(candidate_events or [], columns=EVENT_LOG_FIELDS)
+    events_df = pd.DataFrame(candidate_events or [], columns=EVENT_LOG_FIELDS)
+    if not events_df.empty:
         events_df.insert(0, "scenario", scenario.name)
+    elif emit_diagnostics or collect_events:
+        events_df = pd.DataFrame(columns=["scenario", *EVENT_LOG_FIELDS])
+    if (emit_diagnostics or collect_events) and not events_df.empty:
+        events_df.to_csv(events_path, index=False)
+    elif (emit_diagnostics or collect_events) and not events_path.exists():
         events_df.to_csv(events_path, index=False)
 
     surrogate_path = output_dir / f"{scenario.name}_surrogate.csv"
     surrogate_frame.to_csv(surrogate_path, index=False)
 
-    return {"surrogate": surrogate_path, "reference": reference_path}, surrogate_frame, reference_frame
+    if dump_t0:
+        model = load_frozen_model(scenario.snapshot)
+        t0_path = model.source_dir / "equations_eval_t0.csv"
+        if t0_path.is_file():
+            shutil.copyfile(t0_path, output_dir / f"{scenario.name}_equations_eval_t0.csv")
+        else:
+            logging.warning("equations_eval_t0.csv not found under %s", model.source_dir)
+
+    return {"surrogate": surrogate_path, "reference": reference_path}, surrogate_frame, reference_frame, events_df
 
 
 def _performance_benchmark(parameters: Tuple[Path, ...], replicates: int) -> Dict[str, float]:
@@ -185,6 +201,58 @@ def summarize_alignment_errors(
     return table.head(topk), worst
 
 
+def _compute_rel_l2(surrogate: pd.Series, reference: pd.Series) -> float:
+    diff = surrogate.to_numpy() - reference.to_numpy()
+    denom = np.linalg.norm(reference.to_numpy()) or 1e-12
+    return float(np.linalg.norm(diff) / denom)
+
+
+def _compute_max_rel(surrogate: pd.Series, reference: pd.Series) -> float:
+    diff = surrogate.to_numpy() - reference.to_numpy()
+    denom = np.maximum(np.abs(reference.to_numpy()), 1e-12)
+    return float(np.max(np.abs(diff) / denom))
+
+
+def _enforce_numeric_gates(output_dir: Path, run_data: List[Tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame]]) -> None:
+    key_columns = ["tumour_volume_l", "pd1_occupancy", "tcell_density_per_ul"]
+    rel_l2_threshold = 1e-3
+    max_re_threshold = 5e-3
+    event_threshold_hours = 0.5
+
+    for scenario_name, surrogate, reference, events_df in run_data:
+        for column in key_columns:
+            if column not in surrogate.columns or column not in reference.columns:
+                raise SystemExit(f"NUMERIC_GATE_FAIL scenario={scenario_name} missing column '{column}' in outputs")
+            rel_l2 = _compute_rel_l2(surrogate[column], reference[column])
+            if rel_l2 > rel_l2_threshold:
+                raise SystemExit(
+                    f"NUMERIC_GATE_FAIL scenario={scenario_name} column={column} rel_L2={rel_l2:.6g}>{rel_l2_threshold}"
+                )
+            max_rel = _compute_max_rel(surrogate[column], reference[column])
+            if max_rel > max_re_threshold:
+                raise SystemExit(
+                    f"NUMERIC_GATE_FAIL scenario={scenario_name} column={column} maxRE={max_rel:.6g}>{max_re_threshold}"
+                )
+
+        reference_events_path = output_dir / f"events_{scenario_name}_reference.csv"
+        if not reference_events_path.is_file():
+            raise SystemExit(f"NUMERIC_GATE_FAIL scenario={scenario_name} missing reference event log {reference_events_path}")
+        reference_events = pd.read_csv(reference_events_path)
+        if len(reference_events) != len(events_df):
+            raise SystemExit(
+                f"NUMERIC_GATE_FAIL scenario={scenario_name} event count mismatch (reference={len(reference_events)} vs python={len(events_df)})"
+            )
+        if len(reference_events) > 0:
+            ref_sorted = reference_events.sort_values(["event_index", "time_fire"]).reset_index(drop=True)
+            cand_sorted = events_df.sort_values(["event_index", "time_fire"]).reset_index(drop=True)
+            delta_hours = np.abs(cand_sorted["time_fire"] - ref_sorted["time_fire"]) * 24.0
+            if (delta_hours > event_threshold_hours).any():
+                worst = float(delta_hours.max())
+                raise SystemExit(
+                    f"NUMERIC_GATE_FAIL scenario={scenario_name} event_time_delta_hours={worst:.6g}>{event_threshold_hours}"
+                )
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate the Python surrogate against the reference equations")
     parser.add_argument("--output", type=Path, default=Path("artifacts/validation"))
@@ -197,6 +265,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     parser.add_argument("--seed", type=int, default=42, help="Deterministic seed propagated to simulations")
     parser.add_argument("--emit-diagnostics", action="store_true", help="Emit solver/banner diagnostics and error tables")
+    parser.add_argument("--numeric-gates", action="store_true", help="Enforce rel_L2/maxRE/event timing thresholds")
+    parser.add_argument("--dump-t0", action="store_true", help="Copy equations_eval_t0.csv into the output directory")
     scenario_choices = sorted(SCENARIO_REGISTRY.keys())
     parser.add_argument(
         "--scenarios",
@@ -223,15 +293,19 @@ def main(argv: Iterable[str] | None = None) -> int:
     metrics_records: List[Dict[str, object]] = []
     worst_alignment: Optional[Dict[str, object]] = None
     observables = ["tumour_volume_l", "pd1_occupancy", "tcell_density_per_ul"]
+    run_data: List[Tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = []
 
     for scenario in scenarios:
-        paths, surrogate_frame, reference_frame = _run_scenario(
+        paths, surrogate_frame, reference_frame, events_df = _run_scenario(
             scenario,
             args.output,
             emit_diagnostics=args.emit_diagnostics,
             seed=args.seed,
+            collect_events=args.numeric_gates,
+            dump_t0=args.dump_t0,
         )
         results.append({"scenario": scenario.name, **paths})
+        run_data.append((scenario.name, surrogate_frame, reference_frame, events_df))
 
         surrogate = surrogate_frame
         reference = reference_frame
@@ -286,6 +360,9 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     registry_df = pd.DataFrame(results)
     registry_df.to_csv(args.output / "artefacts.csv", index=False)
+
+    if args.numeric_gates:
+        _enforce_numeric_gates(args.output, run_data)
 
     if worst_alignment is None:
         logger.error("Validation failed: no alignment data available.")

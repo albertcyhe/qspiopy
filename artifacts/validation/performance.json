@@ -1,7 +1,7 @@
 {
   "replicates": 50,
-  "reference_seconds": 0.5916255409829319,
+  "reference_seconds": 0.5141507919761352,
   "reference_replicates": 1,
-  "surrogate_seconds": 29.732805208011996,
+  "surrogate_seconds": 25.93810841598315,
   "surrogate_replicates": 50
 }

@@ -87,6 +87,14 @@ Kept as a façade for backwards compatibility. External callers (e.g. CLI script
 
 Defines the typed exception hierarchy (`ConfigError`, `SnapshotError`, `NumericsError`, `AlignmentFail`) used by `simulation.py` and downstream tooling for clearer failure handling.
 
+### `scripts/scenario_registry.py`
+
+Thin orchestration layer describing the tuning scenarios (A-series/B-series). It
+contains high-level dose descriptors, sampling cadence, and context-output
+mappings, and exposes helpers to convert them into `DoseEntry` objects for the
+runtime. CLI tools (e.g., `run_alignment_suite.py`) consume this registry to
+launch alignment runs without hard-coding engineered settings inside the engine.
+
 ## Public API
 
 All upstream tooling should use the re-exported symbols in `src.offline`:

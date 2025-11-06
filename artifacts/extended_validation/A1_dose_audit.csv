@@ -1,0 +1,5 @@
+time_days,time_hours,dose_name,target,interpreted_dimension,compartment,compartment_volume_l,delta_applied,amount_moles,amount_mg,time_unit
+0.0,0.0,registry_nivolumab_1,V_C.nivolumab,amount,V_C,5.0,2.785515320334262e-07,1.392757660167131e-06,200.0,day
+21.0,504.0,registry_nivolumab_2,V_C.nivolumab,amount,V_C,5.0,2.785515320334262e-07,1.392757660167131e-06,200.0,day
+42.0,1008.0,registry_nivolumab_3,V_C.nivolumab,amount,V_C,5.0,2.785515320334262e-07,1.392757660167131e-06,200.0,day
+63.0,1512.0,registry_nivolumab_4,V_C.nivolumab,amount,V_C,5.0,2.785515320334262e-07,1.392757660167131e-06,200.0,day

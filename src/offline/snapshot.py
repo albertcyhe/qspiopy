@@ -271,7 +271,7 @@ class FrozenModel:
             derivative[idx] = rule.compiled.evaluate(context)
         return derivative
 
-    def apply_dose(self, dose: DoseEntry, amount: float, context: Dict[str, float], state: np.ndarray) -> None:
+    def apply_dose(self, dose: DoseEntry, amount: float, context: Dict[str, float], state: np.ndarray) -> Dict[str, object]:
         target = dose.target
         entry = self.species_lookup.get(target)
         if entry is None and target in self.species_name_lookup:
@@ -279,7 +279,13 @@ class FrozenModel:
         if entry is None:
             new_value = context.get(target, 0.0) + amount
             self._apply_target_value(target, new_value, context, state)
-            return
+            return {
+                "target": target,
+                "interpreted_dimension": None,
+                "compartment": None,
+                "compartment_volume_l": None,
+                "delta_applied": amount,
+            }
         delta = amount
         units_lower = entry.units.lower()
         dimension_lower = entry.interpreted_dimension.lower()
@@ -297,6 +303,13 @@ class FrozenModel:
         current_value = context.get(entry.identifier, 0.0)
         new_value = current_value + delta
         self._apply_target_value(entry.identifier, new_value, context, state)
+        return {
+            "target": entry.identifier,
+            "interpreted_dimension": entry.interpreted_dimension,
+            "compartment": entry.compartment,
+            "compartment_volume_l": context.get(entry.compartment, self.compartments.get(entry.compartment)),
+            "delta_applied": delta,
+        }
 
     def rhs(self, t: float, y: np.ndarray) -> np.ndarray:
         state_view = np.array(y, dtype=float, copy=True)

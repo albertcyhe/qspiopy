@@ -138,7 +138,8 @@ def _fallback_anti_pd1_doses(model: FrozenModel, days: float) -> List[ScheduledD
     mg_per_kg = 3.0
     patient_weight = 70.0
     molecular_weight = 1.436e8
-    amount = patient_weight * mg_per_kg / molecular_weight
+    amount_mg = patient_weight * mg_per_kg
+    amount = amount_mg / molecular_weight
     fallback = DoseEntry(
         index=10_000,
         name="nivolumab_fallback",
@@ -149,10 +150,19 @@ def _fallback_anti_pd1_doses(model: FrozenModel, days: float) -> List[ScheduledD
         start_time=0.0,
         interval=14.0,
         repeat_count=30,
+        amount_mg=amount_mg,
     )
     schedule: List[ScheduledDose] = []
     for time_point in _enumerate_dose_times(fallback, days):
-        schedule.append(ScheduledDose(time=time_point, priority=fallback.index, dose=fallback, amount=amount))
+        schedule.append(
+            ScheduledDose(
+                time=time_point,
+                priority=fallback.index,
+                dose=fallback,
+                amount=amount,
+                amount_mg=amount_mg,
+            )
+        )
     return schedule
 
 
@@ -160,7 +170,15 @@ def _materialise_schedule(doses: Sequence[DoseEntry], days: float) -> List[Sched
     schedule: List[ScheduledDose] = []
     for dose in doses:
         for time_point in _enumerate_dose_times(dose, days):
-            schedule.append(ScheduledDose(time=time_point, priority=dose.index, dose=dose, amount=dose.amount))
+            schedule.append(
+                ScheduledDose(
+                    time=time_point,
+                    priority=dose.index,
+                    dose=dose,
+                    amount=dose.amount,
+                    amount_mg=dose.amount_mg,
+                )
+            )
     schedule.sort(key=lambda item: (item.time, item.priority))
     return schedule
 
@@ -325,6 +343,7 @@ def simulate_frozen_model(
     scheduler: Optional[DoseScheduler] = None,
     custom_doses: Optional[Sequence[DoseEntry]] = None,
     context_outputs: Optional[Mapping[str, str]] = None,
+    dose_audit: Optional[List[Dict[str, object]]] = None,
 ) -> ScenarioResult:
     try:
         model = load_frozen_model(snapshot)
@@ -421,11 +440,31 @@ def simulate_frozen_model(
     current_state = state
     context = reconcile(current_state)
 
+    def record_dose_audit(time_days: float, scheduled_dose: ScheduledDose, info: Dict[str, object]) -> None:
+        if dose_audit is None:
+            return
+        dose_audit.append(
+            {
+                "time_days": time_days,
+                "time_hours": time_days * 24.0,
+                "dose_name": scheduled_dose.dose.name,
+                "target": scheduled_dose.dose.target,
+                "interpreted_dimension": info.get("interpreted_dimension"),
+                "compartment": info.get("compartment"),
+                "compartment_volume_l": info.get("compartment_volume_l"),
+                "delta_applied": info.get("delta_applied"),
+                "amount_moles": scheduled_dose.amount,
+                "amount_mg": scheduled_dose.amount_mg,
+                "time_unit": model.time_unit,
+            }
+        )
+
     while dose_index < len(scheduled_list) and abs(scheduled_list[dose_index].time) <= tol_time:
         scheduled_dose = scheduled_list[dose_index]
-        model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
+        audit_info = model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
         context = reconcile(current_state)
         samples[0.0] = current_state.copy()
+        record_dose_audit(0.0, scheduled_dose, audit_info)
         logger.info(
             "dose_event time=%g target=%s amount=%g",
             scheduled_dose.time,
@@ -452,9 +491,10 @@ def simulate_frozen_model(
                 samples[current_time] = current_state.copy()
             while dose_index < len(scheduled_list) and scheduled_list[dose_index].time <= current_time + tol_time:
                 scheduled_dose = scheduled_list[dose_index]
-                model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
+                audit_info = model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
                 context = reconcile(current_state)
                 samples[current_time] = current_state.copy()
+                record_dose_audit(current_time, scheduled_dose, audit_info)
                 logger.info(
                     "dose_event time=%g target=%s amount=%g",
                     scheduled_dose.time,
@@ -561,9 +601,10 @@ def simulate_frozen_model(
 
         while dose_index < len(scheduled_list) and scheduled_list[dose_index].time <= current_time + tol_time:
             scheduled_dose = scheduled_list[dose_index]
-            model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
+            audit_info = model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
             context = reconcile(current_state)
             samples[current_time] = current_state.copy()
+            record_dose_audit(current_time, scheduled_dose, audit_info)
             logger.info(
                 "dose_event time=%g target=%s amount=%g",
                 scheduled_dose.time,

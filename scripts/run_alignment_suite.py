@@ -6,116 +6,51 @@ import argparse
 import json
 import subprocess
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 
+from scripts.scenario_registry import ScenarioSpec, a_series, b_series, doses_to_entries
 from scripts.validate_surrogate import _compute_metrics
 from src.offline.entities import BASE_HEADER
-from src.offline.frozen_model import DoseEntry, simulate_frozen_model
-
-
-DRUG_INFO: Dict[str, Dict[str, float | str]] = {
-    "nivolumab": {"mw_mg_per_mol": 1.436e8, "target": "V_C.nivolumab"},
-    "durvalumab": {"mw_mg_per_mol": 1.436e8, "target": "V_C.durvalumab"},
-    "ipilimumab": {"mw_mg_per_mol": 1.486349e8, "target": "V_C.ipililumab"},
-}
-
-
-@dataclass(frozen=True)
-class DoseSpec:
-    drug: str
-    start_day: float
-    interval_days: float
-    repeat_count: int
-    amount_mg: Optional[float] = None
-    amount_mg_per_kg: Optional[float] = None
-    label: Optional[str] = None
-
-    def amount_mg_weighted(self, patient_weight_kg: float) -> float:
-        if self.amount_mg is not None:
-            return float(self.amount_mg)
-        if self.amount_mg_per_kg is None:
-            raise ValueError(f"DoseSpec for {self.drug} missing amount specification")
-        return float(self.amount_mg_per_kg) * float(patient_weight_kg)
-
-
-@dataclass(frozen=True)
-class ScenarioSpec:
-    scenario_id: str
-    snapshot: str
-    model_script: str
-    therapy: str
-    stop_time_days: float
-    patient_weight_kg: float
-    doses: Sequence[DoseSpec]
-    sample_interval_hours: float = 0.5
-    extra_outputs: Dict[str, str] = field(default_factory=dict)
+from src.offline.frozen_model import simulate_frozen_model
 
 
 def _resolve_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _build_dose_entries(spec: ScenarioSpec, *, index_offset: int = 10_000) -> List[DoseEntry]:
-    entries: List[DoseEntry] = []
-    for idx, dose in enumerate(spec.doses, start=1):
-        drug = dose.drug.lower()
-        if drug not in DRUG_INFO:
-            raise ValueError(f"Unsupported drug '{dose.drug}'")
-        info = DRUG_INFO[drug]
-        mw = float(info["mw_mg_per_mol"])
-        target = str(info["target"])
-        amount_mg = dose.amount_mg_weighted(spec.patient_weight_kg)
-        dose_moles = amount_mg / mw
-        entry = DoseEntry(
-            index=index_offset + idx,
-            name=dose.label or f"{spec.scenario_id}_{drug}_{idx}",
-            dose_type="RepeatDose",
-            target=target,
-            amount=dose_moles,
-            amount_units="mole",
-            start_time=float(dose.start_day),
-            interval=float(dose.interval_days),
-            repeat_count=int(dose.repeat_count),
-            rate=None,
-            rate_units="",
-            duration=None,
-        )
-        entries.append(entry)
-    return entries
-
-
 def _serialize_doses_for_matlab(spec: ScenarioSpec) -> List[Dict[str, float | str]]:
     payload: List[Dict[str, float | str]] = []
     for idx, dose in enumerate(spec.doses, start=1):
-        amount_mg = dose.amount_mg_weighted(spec.patient_weight_kg)
         payload.append(
             {
-                "name": dose.label or f"{spec.scenario_id}_{dose.drug}_{idx}",
+                "name": f"{spec.name}_dose_{idx}",
                 "drug": dose.drug,
-                "amount_mg": amount_mg,
-                "start_time": float(dose.start_day),
-                "interval": float(dose.interval_days),
-                "repeat_count": int(dose.repeat_count),
+                "amount_mg": dose.amount_mg,
+                "start_time": dose.time_hours / 24.0,
+                "interval": dose.interval_hours / 24.0,
+                "repeat_count": int(dose.repeat),
             }
         )
     return payload
 
 
-def _simulate_python(spec: ScenarioSpec, *, doses: List[DoseEntry]):
+def _simulate_python(spec: ScenarioSpec):
+    dose_entries = doses_to_entries(spec.doses)
+    audit_rows: List[Dict[str, object]] = []
     result = simulate_frozen_model(
         spec.snapshot,
-        days=spec.stop_time_days,
+        days=spec.days,
         therapy=spec.therapy,
         sample_interval_hours=spec.sample_interval_hours,
-        custom_doses=doses,
-        context_outputs=spec.extra_outputs,
+        custom_doses=dose_entries,
+        context_outputs=spec.context_outputs,
+        dose_audit=audit_rows,
     )
-    return result
+    return result, audit_rows
 
 
 def _call_matlab(matlab_cli: Path, repo_root: Path, config_path: Path, output_path: Path) -> None:
@@ -184,123 +119,20 @@ def _compare_frames(
     return pd.DataFrame(records)
 
 
-def _compute_auc(series: Iterable[float], time: Iterable[float]) -> float:
-    return float(np.trapezoid(series, time))
-
-
 def _scenario_registry() -> Dict[str, ScenarioSpec]:
-    return {
-        "A1": ScenarioSpec(
-            scenario_id="A1",
-            snapshot="example1",
-            model_script="example1",
-            therapy="anti_pd1",
-            stop_time_days=84.0,
-            patient_weight_kg=70.0,
-            doses=[
-                DoseSpec(drug="nivolumab", amount_mg=200.0, start_day=0.0, interval_days=21.0, repeat_count=3),
-            ],
-            extra_outputs={
-                "drug_plasma_molar": "V_C.nivolumab",
-                "drug_tumor_molar": "V_T.nivolumab",
-                "cd8_tumor_cells": "V_T.T1",
-                "treg_tumor_cells": "V_T.T0",
-            },
-        ),
-        "A2": ScenarioSpec(
-            scenario_id="A2",
-            snapshot="example1",
-            model_script="example1",
-            therapy="anti_pd1",
-            stop_time_days=84.0,
-            patient_weight_kg=70.0,
-            doses=[
-                DoseSpec(drug="nivolumab", amount_mg=240.0, start_day=0.0, interval_days=14.0, repeat_count=5),
-            ],
-            extra_outputs={
-                "drug_plasma_molar": "V_C.nivolumab",
-                "drug_tumor_molar": "V_T.nivolumab",
-                "cd8_tumor_cells": "V_T.T1",
-                "treg_tumor_cells": "V_T.T0",
-            },
-        ),
-        "A3": ScenarioSpec(
-            scenario_id="A3",
-            snapshot="example1",
-            model_script="example1",
-            therapy="anti_pd1",
-            stop_time_days=84.0,
-            patient_weight_kg=70.0,
-            doses=[
-                DoseSpec(drug="nivolumab", amount_mg=400.0, start_day=0.0, interval_days=42.0, repeat_count=1),
-            ],
-            extra_outputs={
-                "drug_plasma_molar": "V_C.nivolumab",
-                "drug_tumor_molar": "V_T.nivolumab",
-                "cd8_tumor_cells": "V_T.T1",
-                "treg_tumor_cells": "V_T.T0",
-            },
-        ),
-        "A4": ScenarioSpec(
-            scenario_id="A4",
-            snapshot="example1",
-            model_script="example1",
-            therapy="anti_pd1",
-            stop_time_days=84.0,
-            patient_weight_kg=70.0,
-            doses=[
-                DoseSpec(drug="nivolumab", amount_mg_per_kg=3.0, start_day=0.0, interval_days=14.0, repeat_count=5),
-            ],
-            extra_outputs={
-                "drug_plasma_molar": "V_C.nivolumab",
-                "drug_tumor_molar": "V_T.nivolumab",
-                "cd8_tumor_cells": "V_T.T1",
-                "treg_tumor_cells": "V_T.T0",
-            },
-        ),
-        "A5": ScenarioSpec(
-            scenario_id="A5",
-            snapshot="example1",
-            model_script="example1",
-            therapy="anti_pd1",
-            stop_time_days=84.0,
-            patient_weight_kg=70.0,
-            doses=[
-                DoseSpec(drug="nivolumab", amount_mg=800.0, start_day=0.0, interval_days=21.0, repeat_count=0, label="load"),
-                DoseSpec(drug="nivolumab", amount_mg=200.0, start_day=21.0, interval_days=21.0, repeat_count=2, label="maintenance"),
-            ],
-            extra_outputs={
-                "drug_plasma_molar": "V_C.nivolumab",
-                "drug_tumor_molar": "V_T.nivolumab",
-                "cd8_tumor_cells": "V_T.T1",
-                "treg_tumor_cells": "V_T.T0",
-            },
-        ),
-        "A6": ScenarioSpec(
-            scenario_id="A6",
-            snapshot="example1",
-            model_script="example1",
-            therapy="anti_pd1",
-            stop_time_days=84.0,
-            patient_weight_kg=70.0,
-            doses=[
-                DoseSpec(drug="nivolumab", amount_mg=50.0, start_day=0.0, interval_days=42.0, repeat_count=1),
-            ],
-            extra_outputs={
-                "drug_plasma_molar": "V_C.nivolumab",
-                "drug_tumor_molar": "V_T.nivolumab",
-                "cd8_tumor_cells": "V_T.T1",
-                "treg_tumor_cells": "V_T.T0",
-            },
-        ),
-    }
+    specs = a_series() + b_series()
+    registry: Dict[str, ScenarioSpec] = {}
+    for spec in specs:
+        registry[spec.name] = spec
+    return registry
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Extended Python vs MATLAB alignment runner")
     parser.add_argument("--output", type=Path, default=Path("artifacts/extended_validation"))
     parser.add_argument("--matlab-cli", type=Path, default=Path("/Volumes/AlbertSSD/Applications/MATLAB_R2023b.app/bin/matlab"))
-    parser.add_argument("--scenarios", nargs="+", choices=list(_scenario_registry().keys()) + ["all"])
+    available = list(_scenario_registry().keys())
+    parser.add_argument("--scenarios", nargs="+", choices=available + ["all"])
     parser.add_argument("--skip-matlab", action="store_true", help="Run only Python surrogate (no MATLAB reference)")
     parser.add_argument("--emit-metrics", action="store_true", help="Write per-observable alignment metrics")
     args = parser.parse_args(argv)
@@ -319,28 +151,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     for scenario_id in scenario_ids:
         spec = registry[scenario_id]
-        dose_entries = _build_dose_entries(spec)
-        result = _simulate_python(spec, doses=dose_entries)
-        surrogate_path = output_dir / f"{spec.scenario_id}_surrogate.csv"
+        result, audit_rows = _simulate_python(spec)
+        surrogate_path = output_dir / f"{spec.name}_surrogate.csv"
         result.save_csv(surrogate_path, order="contract", include_header_manifest=True)
         surrogate_df = result.to_frame()
+        if audit_rows:
+            audit_path = output_dir / f"{spec.name}_dose_audit.csv"
+            pd.DataFrame(audit_rows).to_csv(audit_path, index=False)
 
-        reference_path = output_dir / f"{spec.scenario_id}_reference.csv"
+        reference_path = output_dir / f"{spec.name}_reference.csv"
         if not args.skip_matlab:
             config_payload = {
-                "scenario_id": spec.scenario_id,
-                "model_script": spec.model_script,
-                "stop_time_days": spec.stop_time_days,
+                "scenario_id": spec.name,
+                "label": spec.label,
+                "model_script": spec.matlab_script,
+                "stop_time_days": spec.days,
                 "sample_interval_hours": spec.sample_interval_hours,
-                "patient_weight_kg": spec.patient_weight_kg,
                 "rtol": 1e-6,
                 "atol": 1e-12,
                 "max_step": None,
                 "doses": _serialize_doses_for_matlab(spec),
             }
-            config_path = output_dir / f"{spec.scenario_id}_scenario.json"
-                config_path.write_text(json.dumps(config_payload, indent=2), encoding="utf8")
-                _call_matlab(args.matlab_cli, repo_root, config_path, reference_path)
+            config_path = output_dir / f"{spec.name}_scenario.json"
+            config_path.write_text(json.dumps(config_payload, indent=2), encoding="utf8")
+            _call_matlab(args.matlab_cli, repo_root, config_path, reference_path)
 
         if reference_path.is_file():
             surrogate = surrogate_df.copy()
@@ -360,15 +194,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "tcell_density_per_ul",
             ] + [column for column in header if column not in BASE_HEADER]
             per_column = _compare_frames(surrogate, reference, columns)
-            per_column.insert(0, "scenario", spec.scenario_id)
+            per_column.insert(0, "scenario", spec.name)
             metrics_records.extend(per_column.to_dict(orient="records"))
 
-            # Add aggregate metrics replicating validate_surrogate for core observables
             for observable in ["tumour_volume_l", "pd1_occupancy", "tcell_density_per_ul"]:
                 met = _compute_metrics(surrogate, reference, observable)
                 metrics_records.append(
                     {
-                        "scenario": spec.scenario_id,
+                        "scenario": spec.name,
                         "observable": observable,
                         **met,
                     }
