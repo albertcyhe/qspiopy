@@ -23,10 +23,15 @@ class AlignmentFail(OfflineError):
     """Raised when semantic alignment checks exceed tolerances."""
 
 
+class TimebaseContractError(OfflineError):
+    """Raised when the requested sampling grid violates timebase contracts."""
+
+
 __all__ = [
     "OfflineError",
     "ConfigError",
     "SnapshotError",
     "NumericsError",
     "AlignmentFail",
+    "TimebaseContractError",
 ]

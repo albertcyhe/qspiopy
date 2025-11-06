@@ -195,3 +195,4 @@ class ScheduledDose:
     dose: DoseEntry = field(compare=False)
     amount: float = field(compare=False)
     amount_mg: Optional[float] = field(default=None, compare=False)
+    time_hours: float = field(default=0.0, compare=False)

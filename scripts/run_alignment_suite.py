@@ -15,7 +15,7 @@ import pandas as pd
 from scripts.scenario_registry import ScenarioSpec, a_series, b_series, doses_to_entries
 from scripts.validate_surrogate import _compute_metrics
 from src.offline.entities import BASE_HEADER
-from src.offline.frozen_model import simulate_frozen_model
+from src.offline.frozen_model import EVENT_LOG_FIELDS, simulate_frozen_model
 
 
 def _resolve_repo_root() -> Path:
@@ -41,6 +41,7 @@ def _serialize_doses_for_matlab(spec: ScenarioSpec) -> List[Dict[str, float | st
 def _simulate_python(spec: ScenarioSpec):
     dose_entries = doses_to_entries(spec.doses)
     audit_rows: List[Dict[str, object]] = []
+    events: List[Dict[str, object]] = []
     result = simulate_frozen_model(
         spec.snapshot,
         days=spec.days,
@@ -49,8 +50,9 @@ def _simulate_python(spec: ScenarioSpec):
         custom_doses=dose_entries,
         context_outputs=spec.context_outputs,
         dose_audit=audit_rows,
+        event_log=events,
     )
-    return result, audit_rows
+    return result, audit_rows, events
 
 
 def _call_matlab(matlab_cli: Path, repo_root: Path, config_path: Path, output_path: Path) -> None:
@@ -151,13 +153,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     for scenario_id in scenario_ids:
         spec = registry[scenario_id]
-        result, audit_rows = _simulate_python(spec)
+        result, audit_rows, events = _simulate_python(spec)
         surrogate_path = output_dir / f"{spec.name}_surrogate.csv"
         result.save_csv(surrogate_path, order="contract", include_header_manifest=True)
         surrogate_df = result.to_frame()
         if audit_rows:
             audit_path = output_dir / f"{spec.name}_dose_audit.csv"
             pd.DataFrame(audit_rows).to_csv(audit_path, index=False)
+        if events:
+            events_df = pd.DataFrame(events, columns=EVENT_LOG_FIELDS)
+        else:
+            events_df = pd.DataFrame(columns=EVENT_LOG_FIELDS)
+        if not events_df.empty or not (output_dir / f"{spec.name}_events_surrogate.csv").exists():
+            events_df = events_df.copy()
+            if "time_fire" in events_df.columns:
+                events_df["time_hours"] = events_df["time_fire"] * 24.0
+            if "event_index" in events_df.columns and "index_in_model" not in events_df.columns:
+                events_df["index_in_model"] = events_df["event_index"]
+            events_path = output_dir / f"{spec.name}_events_surrogate.csv"
+            events_df.to_csv(events_path, index=False)
 
         reference_path = output_dir / f"{spec.name}_reference.csv"
         if not args.skip_matlab:

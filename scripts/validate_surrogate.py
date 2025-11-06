@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import shutil
 import time
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from scripts.compare_audits import compare_doses, compare_events
+from scripts.scenario_registry import a_series, doses_to_entries, microdose
 from src.offline.frozen_model import EVENT_LOG_FIELDS, load_frozen_model, simulate_frozen_model
 
 
@@ -24,6 +27,9 @@ class Scenario:
     therapy: str
     snapshot: str
     stop_time: float = 400.0
+    sample_interval_hours: Optional[float] = None
+    custom_doses: Optional[Tuple] = None
+    context_outputs: Optional[Dict[str, str]] = None
 
 
 SCENARIO_REGISTRY: Dict[str, Scenario] = {
@@ -53,6 +59,77 @@ SCENARIO_REGISTRY: Dict[str, Scenario] = {
         stop_time=10.0,
     ),
 }
+
+A1_SPEC = a_series()[0]
+A1_DOSES = tuple(doses_to_entries(A1_SPEC.doses))
+MICRO_SPEC = microdose()
+MICRO_DOSES = tuple(doses_to_entries(MICRO_SPEC.doses))
+SCENARIO_REGISTRY["A1"] = Scenario(
+    "A1",
+    tuple(),
+    "anti_pd1",
+    snapshot=A1_SPEC.snapshot,
+    stop_time=A1_SPEC.days,
+    sample_interval_hours=A1_SPEC.sample_interval_hours,
+    custom_doses=A1_DOSES,
+    context_outputs=dict(A1_SPEC.context_outputs),
+)
+SCENARIO_REGISTRY[MICRO_SPEC.name] = Scenario(
+    MICRO_SPEC.name,
+    tuple(),
+    MICRO_SPEC.therapy,
+    snapshot=MICRO_SPEC.snapshot,
+    stop_time=MICRO_SPEC.days,
+    sample_interval_hours=MICRO_SPEC.sample_interval_hours,
+    custom_doses=MICRO_DOSES,
+    context_outputs=dict(MICRO_SPEC.context_outputs),
+)
+
+
+def _collect_pk_invariants(model) -> Dict[str, float]:
+    invariants: Dict[str, float] = {}
+    params = model.parameters
+    compartments = model.compartments
+
+    def ratio(param_key: str, compartment_key: str, label: str) -> None:
+        value = params.get(param_key)
+        volume = compartments.get(compartment_key)
+        if value is None or volume in (None, 0.0):
+            return
+        invariants[label] = float(value) / float(volume)
+
+    ratio("k_cl_nivolumab", "V_C", "kel_nivolumab")
+    ratios = [
+        ("q_T_nivolumab", "V_C", "k12_nivolumab_T"),
+        ("q_T_nivolumab", "V_T", "k21_nivolumab_T"),
+        ("q_LN_nivolumab", "V_C", "k12_nivolumab_LN"),
+        ("q_LN_nivolumab", "V_LN", "k21_nivolumab_LN"),
+        ("q_P_nivolumab", "V_C", "k12_nivolumab_P"),
+        ("q_P_nivolumab", "V_P", "k21_nivolumab_P"),
+    ]
+    for param_key, compartment_key, label in ratios:
+        ratio(param_key, compartment_key, label)
+    return invariants
+
+
+def _estimate_kel(frame: pd.DataFrame, last_dose_day: Optional[float]) -> Optional[float]:
+    if "drug_plasma_molar" not in frame.columns:
+        return None
+    times = frame["time_days"].to_numpy(dtype=float)
+    conc = frame["drug_plasma_molar"].to_numpy(dtype=float)
+    mask = conc > 0
+    if last_dose_day is not None:
+        mask &= times >= (last_dose_day + 1.0)
+    tail_times = times[mask]
+    tail_conc = conc[mask]
+    if tail_conc.size < 4:
+        return None
+    log_conc = np.log(tail_conc)
+    slope, _ = np.polyfit(tail_times, log_conc, 1)
+    kel = -float(slope)
+    if kel <= 0 or not np.isfinite(kel):
+        return None
+    return kel
 
 
 def _compute_metrics(
@@ -113,8 +190,35 @@ def _run_scenario(
     reference_frame = pd.read_csv(reference_path, comment="#")
 
     events_path = output_dir / f"events_{scenario.name}_python.csv"
+    surrogate_events_path = output_dir / f"{scenario.name}_events_surrogate.csv"
 
+    model_meta = load_frozen_model(scenario.snapshot)
+    if scenario.sample_interval_hours is not None:
+        interval = scenario.sample_interval_hours
+        time_unit = model_meta.time_unit
+        if time_unit.lower().startswith("day") and math.isclose(interval, 24.0, rel_tol=0.0, abs_tol=1e-9):
+            raise SystemExit(
+                f"NUMERIC_GATE_FAIL scenario={scenario.name} "
+                "sample_interval_hours=24 while model time unit is 'day'; use hour-based sampling."
+            )
+
+    collect_audit = collect_events
     candidate_events: Optional[List[Dict[str, object]]] = [] if (emit_diagnostics or collect_events) else None
+    dose_audit: Optional[List[Dict[str, object]]] = [] if collect_audit else None
+    sample_interval = scenario.sample_interval_hours
+    simulate_kwargs = {}
+    if sample_interval is not None:
+        simulate_kwargs["sample_interval_hours"] = sample_interval
+    if scenario.custom_doses is not None:
+        simulate_kwargs["custom_doses"] = scenario.custom_doses
+    if scenario.context_outputs is not None:
+        simulate_kwargs["context_outputs"] = scenario.context_outputs
+    if collect_audit:
+        simulate_kwargs["dose_audit"] = dose_audit
+    if collect_events:
+        simulate_kwargs["event_log"] = candidate_events
+    elif emit_diagnostics:
+        simulate_kwargs["event_log"] = candidate_events
     result = simulate_frozen_model(
         scenario.snapshot,
         days=scenario.stop_time,
@@ -122,41 +226,111 @@ def _run_scenario(
         seed=seed,
         emit_diagnostics=emit_diagnostics,
         run_label=scenario.name,
-        event_log=candidate_events,
+        **simulate_kwargs,
     )
     surrogate_frame = result.to_frame()
     events_df = pd.DataFrame(candidate_events or [], columns=EVENT_LOG_FIELDS)
     if not events_df.empty:
+        events_df["time_hours"] = events_df["time_fire"] * 24.0
+        events_df["index_in_model"] = events_df["event_index"]
         events_df.insert(0, "scenario", scenario.name)
     elif emit_diagnostics or collect_events:
         events_df = pd.DataFrame(columns=["scenario", *EVENT_LOG_FIELDS])
-    if (emit_diagnostics or collect_events) and not events_df.empty:
-        events_df.to_csv(events_path, index=False)
-    elif (emit_diagnostics or collect_events) and not events_path.exists():
-        events_df.to_csv(events_path, index=False)
+    if (emit_diagnostics or collect_events):
+        if not events_df.empty:
+            events_df.to_csv(events_path, index=False)
+            events_df.to_csv(surrogate_events_path, index=False)
+        else:
+            if not events_path.exists():
+                events_df.to_csv(events_path, index=False)
+            if not surrogate_events_path.exists():
+                events_df.to_csv(surrogate_events_path, index=False)
 
     surrogate_path = output_dir / f"{scenario.name}_surrogate.csv"
     surrogate_frame.to_csv(surrogate_path, index=False)
+    if dose_audit is not None:
+        audit_df = pd.DataFrame(dose_audit, columns=[
+            "time_days",
+            "time_hours",
+            "dose_name",
+            "target",
+            "interpreted_dimension",
+            "units",
+            "compartment",
+            "compartment_volume_l",
+            "delta_state_value",
+            "delta_amount_mol",
+            "amount_moles",
+            "amount_mg",
+            "time_unit",
+        ])
+        audit_df.to_csv(output_dir / f"{scenario.name}_surrogate_dose_audit.csv", index=False)
+    else:
+        audit_file = output_dir / f"{scenario.name}_surrogate_dose_audit.csv"
+        if not audit_file.exists():
+            pd.DataFrame(columns=[
+                "time_days",
+                "time_hours",
+                "dose_name",
+                "target",
+                "interpreted_dimension",
+                "units",
+                "compartment",
+                "compartment_volume_l",
+                "delta_state_value",
+                "delta_amount_mol",
+                "amount_moles",
+                "amount_mg",
+                "time_unit",
+            ]).to_csv(audit_file, index=False)
 
     if dump_t0:
-        model = load_frozen_model(scenario.snapshot)
+        model = model_meta
         t0_path = model.source_dir / "equations_eval_t0.csv"
         if t0_path.is_file():
             shutil.copyfile(t0_path, output_dir / f"{scenario.name}_equations_eval_t0.csv")
         else:
             logging.warning("equations_eval_t0.csv not found under %s", model.source_dir)
 
-    return {"surrogate": surrogate_path, "reference": reference_path}, surrogate_frame, reference_frame, events_df
+    grid_hours = surrogate_frame["time_days"].to_numpy(dtype=float) * 24.0
+    last_dose_day: Optional[float] = None
+    if scenario.custom_doses:
+        last_dose_day = max(float(entry.start_time) for entry in scenario.custom_doses)
+
+    grid_meta = {
+        "scenario": scenario.name,
+        "grid_first_hours": np.round(grid_hours[:6], 6).tolist(),
+        "grid_unique_step_hours": np.unique(np.round(np.diff(grid_hours), 6))[:3].tolist()
+        if grid_hours.size > 1
+        else [],
+    }
+    pk_meta = {"scenario": scenario.name, **_collect_pk_invariants(model_meta)}
+    pk_meta["kel_param"] = model_meta.parameters.get("k_cl_nivolumab")
+    kel_sur = _estimate_kel(surrogate_frame, last_dose_day)
+    kel_ref = _estimate_kel(reference_frame, last_dose_day)
+    if kel_sur is not None:
+        pk_meta["kel_estimate_surrogate"] = kel_sur
+    if kel_ref is not None:
+        pk_meta["kel_estimate_reference"] = kel_ref
+
+    return (
+        {"surrogate": surrogate_path, "reference": reference_path},
+        surrogate_frame,
+        reference_frame,
+        events_df,
+        grid_meta,
+        pk_meta,
+    )
 
 
 def _performance_benchmark(parameters: Tuple[Path, ...], replicates: int) -> Dict[str, float]:
     start = time.perf_counter()
-    simulate_frozen_model("example1", days=400.0, therapy="anti_pd1")
+    simulate_frozen_model("example1", days=400.0, therapy="anti_pd1", sample_interval_hours=12.0)
     ref_time = time.perf_counter() - start
 
     start = time.perf_counter()
     for _ in range(replicates):
-        simulate_frozen_model("example1", days=400.0, therapy="anti_pd1")
+        simulate_frozen_model("example1", days=400.0, therapy="anti_pd1", sample_interval_hours=12.0)
     sur_time = time.perf_counter() - start
 
     return {
@@ -213,44 +387,59 @@ def _compute_max_rel(surrogate: pd.Series, reference: pd.Series) -> float:
     return float(np.max(np.abs(diff) / denom))
 
 
-def _enforce_numeric_gates(output_dir: Path, run_data: List[Tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame]]) -> None:
+def _enforce_numeric_gates(
+    output_dir: Path,
+    run_data: List[
+        Tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict[str, object], Dict[str, float]]
+    ],
+) -> None:
     key_columns = ["tumour_volume_l", "pd1_occupancy", "tcell_density_per_ul"]
     rel_l2_threshold = 1e-3
     max_re_threshold = 5e-3
     event_threshold_hours = 0.5
 
-    for scenario_name, surrogate, reference, events_df in run_data:
+    for scenario_name, surrogate, reference, events_df, _, _ in run_data:
+        issues: List[str] = []
         for column in key_columns:
             if column not in surrogate.columns or column not in reference.columns:
-                raise SystemExit(f"NUMERIC_GATE_FAIL scenario={scenario_name} missing column '{column}' in outputs")
+                issues.append(f"missing column '{column}' in outputs")
+                continue
             rel_l2 = _compute_rel_l2(surrogate[column], reference[column])
             if rel_l2 > rel_l2_threshold:
-                raise SystemExit(
-                    f"NUMERIC_GATE_FAIL scenario={scenario_name} column={column} rel_L2={rel_l2:.6g}>{rel_l2_threshold}"
-                )
+                issues.append(f"column={column} rel_L2={rel_l2:.6g}>{rel_l2_threshold}")
             max_rel = _compute_max_rel(surrogate[column], reference[column])
             if max_rel > max_re_threshold:
-                raise SystemExit(
-                    f"NUMERIC_GATE_FAIL scenario={scenario_name} column={column} maxRE={max_rel:.6g}>{max_re_threshold}"
-                )
+                issues.append(f"column={column} maxRE={max_rel:.6g}>{max_re_threshold}")
 
         reference_events_path = output_dir / f"events_{scenario_name}_reference.csv"
         if not reference_events_path.is_file():
-            raise SystemExit(f"NUMERIC_GATE_FAIL scenario={scenario_name} missing reference event log {reference_events_path}")
-        reference_events = pd.read_csv(reference_events_path)
-        if len(reference_events) != len(events_df):
-            raise SystemExit(
-                f"NUMERIC_GATE_FAIL scenario={scenario_name} event count mismatch (reference={len(reference_events)} vs python={len(events_df)})"
-            )
-        if len(reference_events) > 0:
-            ref_sorted = reference_events.sort_values(["event_index", "time_fire"]).reset_index(drop=True)
-            cand_sorted = events_df.sort_values(["event_index", "time_fire"]).reset_index(drop=True)
-            delta_hours = np.abs(cand_sorted["time_fire"] - ref_sorted["time_fire"]) * 24.0
-            if (delta_hours > event_threshold_hours).any():
-                worst = float(delta_hours.max())
-                raise SystemExit(
-                    f"NUMERIC_GATE_FAIL scenario={scenario_name} event_time_delta_hours={worst:.6g}>{event_threshold_hours}"
-                )
+            alt_ref = output_dir / f"{scenario_name}_events_reference.csv"
+            if alt_ref.is_file():
+                reference_events_path = alt_ref
+        surrogate_events_path = output_dir / f"{scenario_name}_events_surrogate.csv"
+        if not surrogate_events_path.is_file():
+            alt_sur = output_dir / f"events_{scenario_name}_surrogate.csv"
+            if alt_sur.is_file():
+                surrogate_events_path = alt_sur
+        if reference_events_path.is_file() and surrogate_events_path.is_file():
+            event_issues = compare_events(surrogate_events_path, reference_events_path, tol_h=event_threshold_hours)
+            issues.extend(event_issues)
+        else:
+            issues.append("missing event audit files for comparison")
+
+        surrogate_dose_path = output_dir / f"{scenario_name}_surrogate_dose_audit.csv"
+        reference_dose_path = output_dir / f"{scenario_name}_reference_dose_audit.csv"
+        if surrogate_dose_path.is_file() and reference_dose_path.is_file():
+            dose_issues = compare_doses(surrogate_dose_path, reference_dose_path)
+            issues.extend(dose_issues)
+        else:
+            issues.append("missing dose audit files for comparison")
+
+        if issues:
+            print(f"NUMERIC_GATE_FAIL scenario={scenario_name}")
+            for item in issues:
+                print(f" - {item}")
+            raise SystemExit(3)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -293,10 +482,12 @@ def main(argv: Iterable[str] | None = None) -> int:
     metrics_records: List[Dict[str, object]] = []
     worst_alignment: Optional[Dict[str, object]] = None
     observables = ["tumour_volume_l", "pd1_occupancy", "tcell_density_per_ul"]
-    run_data: List[Tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = []
+    run_data: List[
+        Tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict[str, object], Dict[str, float]]
+    ] = []
 
     for scenario in scenarios:
-        paths, surrogate_frame, reference_frame, events_df = _run_scenario(
+        paths, surrogate_frame, reference_frame, events_df, grid_meta, pk_meta = _run_scenario(
             scenario,
             args.output,
             emit_diagnostics=args.emit_diagnostics,
@@ -305,7 +496,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             dump_t0=args.dump_t0,
         )
         results.append({"scenario": scenario.name, **paths})
-        run_data.append((scenario.name, surrogate_frame, reference_frame, events_df))
+        run_data.append((scenario.name, surrogate_frame, reference_frame, events_df, grid_meta, pk_meta))
 
         surrogate = surrogate_frame
         reference = reference_frame
@@ -333,30 +524,51 @@ def main(argv: Iterable[str] | None = None) -> int:
             if worst_alignment is None or candidate["max_rel_err"] > worst_alignment["max_rel_err"]:
                 worst_alignment = candidate
 
-    example1_sur = pd.read_csv(args.output / "example1_treated_surrogate.csv")
-    example1_ref = pd.read_csv(args.output / "example1_treated_reference.csv", comment="#")
-    example1_sur_ctrl = pd.read_csv(args.output / "example1_control_surrogate.csv")
-    example1_ref_ctrl = pd.read_csv(args.output / "example1_control_reference.csv", comment="#")
+    example1_paths = [
+        args.output / "example1_treated_surrogate.csv",
+        args.output / "example1_treated_reference.csv",
+        args.output / "example1_control_surrogate.csv",
+        args.output / "example1_control_reference.csv",
+    ]
+    if all(path.exists() for path in example1_paths):
+        example1_sur = pd.read_csv(example1_paths[0])
+        example1_ref = pd.read_csv(example1_paths[1], comment="#")
+        example1_sur_ctrl = pd.read_csv(example1_paths[2])
+        example1_ref_ctrl = pd.read_csv(example1_paths[3], comment="#")
 
-    tgi_sur = _tgi(example1_sur_ctrl, example1_sur, "tumour_volume_l")
-    tgi_ref = _tgi(example1_ref_ctrl, example1_ref, "tumour_volume_l")
-    metrics_records.append(
-        {
-            "scenario": "example1_treated",
-            "observable": "tgi",
-            "rmse": abs(tgi_sur - tgi_ref),
-            "r2": float("nan"),
-            "delta_auc": tgi_sur - tgi_ref,
-        }
-    )
+        tgi_sur = _tgi(example1_sur_ctrl, example1_sur, "tumour_volume_l")
+        tgi_ref = _tgi(example1_ref_ctrl, example1_ref, "tumour_volume_l")
+        metrics_records.append(
+            {
+                "scenario": "example1_treated",
+                "observable": "tgi",
+                "rmse": abs(tgi_sur - tgi_ref),
+                "r2": float("nan"),
+                "delta_auc": tgi_sur - tgi_ref,
+            }
+        )
 
     metrics_df = pd.DataFrame(metrics_records)
     metrics_path = args.output / "metrics.csv"
     metrics_df.to_csv(metrics_path, index=False)
 
+    grid_records = [meta for _, _, _, _, meta, _ in run_data]
+    pk_records = [pk for _, _, _, _, _, pk in run_data]
+    if grid_records:
+        grid_frame = pd.DataFrame(grid_records)
+        grid_frame.to_csv(args.output / "grid_info.csv", index=False)
+    if pk_records:
+        pk_frame = pd.DataFrame(pk_records)
+        pk_frame.to_csv(args.output / "pk_invariants.csv", index=False)
+
     benchmark = _performance_benchmark((Path("parameters/example1_parameters.json"),), args.replicates)
+    benchmark_payload = {"replicates": args.replicates, **benchmark}
+    if grid_records:
+        benchmark_payload["grid_debug"] = grid_records[0]
+    if pk_records:
+        benchmark_payload["pk_invariants"] = pk_records[0]
     with (args.output / "performance.json").open("w", encoding="utf8") as handle:
-        json.dump({"replicates": args.replicates, **benchmark}, handle, indent=2)
+        json.dump(benchmark_payload, handle, indent=2)
 
     registry_df = pd.DataFrame(results)
     registry_df.to_csv(args.output / "artefacts.csv", index=False)

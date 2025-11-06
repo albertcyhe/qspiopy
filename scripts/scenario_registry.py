@@ -73,7 +73,11 @@ def a_series(snapshot: str = "example1") -> List[ScenarioSpec]:
             sample_interval_hours=12.0,
             therapy="anti_pd1",
             doses=_build_repeat_series(21 * DAY, 4, 200.0, PD1_TARGET_DEFAULT),
-            context_outputs={"drug_plasma_molar": "V_C.nivolumab", "pdl1_occupancy": "H_PD1_C1"},
+            context_outputs={
+                "drug_plasma_molar": "V_C.nivolumab",
+                "drug_tumor_molar": "V_T.nivolumab",
+                "pdl1_occupancy": "H_PD1_C1",
+            },
         ),
         ScenarioSpec(
             name="A2",
@@ -140,6 +144,34 @@ def a_series(snapshot: str = "example1") -> List[ScenarioSpec]:
             context_outputs={"drug_plasma_molar": "V_C.nivolumab"},
         ),
     ]
+
+
+def microdose(snapshot: str = "example1") -> ScenarioSpec:
+    """Return a 1 mg single-dose, 48 h scenario for diagnostics."""
+    drug, mw = _resolve_drug(PD1_TARGET_DEFAULT)
+    return ScenarioSpec(
+        name="microdose_1mg_48h",
+        label="1 mg single dose (48 h)",
+        snapshot=snapshot,
+        matlab_script="example1",
+        days=2.0,
+        sample_interval_hours=0.5,
+        therapy="anti_pd1",
+        doses=[
+            Dose(
+                time_hours=0.0,
+                amount_mg=1.0,
+                drug=drug,
+                target=PD1_TARGET_DEFAULT,
+                molecular_weight_mg_per_mol=mw,
+            )
+        ],
+        context_outputs={
+            "drug_plasma_molar": "V_C.nivolumab",
+            "drug_tumor_molar": "V_T.nivolumab",
+            "pdl1_occupancy": "H_PD1_C1",
+        },
+    )
 
 
 def b_series(snapshot: str = "example1") -> List[ScenarioSpec]:
@@ -242,6 +274,7 @@ __all__ = [
     "ScenarioSpec",
     "a_series",
     "b_series",
+    "microdose",
     "doses_to_entries",
     "HOUR",
     "DAY",

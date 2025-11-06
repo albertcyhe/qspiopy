@@ -327,6 +327,21 @@ def _time_unit_sniff(model: FrozenModel, interval_hours: Optional[float]) -> Non
             logger.warning("hour-based model with interval %.6g may indicate day/hour mismatch", interval_hours)
 
 
+def _effective_max_step(model: FrozenModel, solver: SolverConfig, span: float) -> float:
+    if span <= _TIME_TOL:
+        return span
+    cap = 1.0
+    candidate = 0.5 * min(span, cap)
+    if candidate <= _TIME_TOL:
+        candidate = min(span, cap)
+    if math.isfinite(solver.max_step):
+        candidate = min(candidate, solver.max_step)
+    candidate = min(candidate, span)
+    if candidate <= _TIME_TOL:
+        candidate = max(span * 0.5, _TIME_TOL * 10.0)
+    return candidate
+
+
 def simulate_frozen_model(
     snapshot: str,
     *,
@@ -479,6 +494,8 @@ def simulate_frozen_model(
         next_dose_time = scheduled_list[dose_index].time if dose_index < len(scheduled_list) else float("inf")
         next_event_time = pending_events[0].time if pending_events else float("inf")
         target_time = min(days, next_dose_time, next_event_time)
+        is_dose_boundary = dose_index < len(scheduled_list) and abs(next_dose_time - target_time) <= tol_time
+        is_pending_boundary = pending_events and abs(next_event_time - target_time) <= tol_time
 
         if target_time <= current_time + tol_time:
             current_time = target_time
@@ -504,21 +521,95 @@ def simulate_frozen_model(
                 dose_index += 1
             continue
 
-        sol = solve_ivp(
-            model.rhs,
-            (current_time, target_time),
-            current_state,
-            method=solver_config.method,
-            rtol=solver_config.rtol,
-            atol=solver_config.atol,
-            max_step=solver_config.max_step,
-            dense_output=True,
-            events=event_functions if event_functions else None,
-            vectorized=False,
-        )
+        integration_target = target_time
+        if is_dose_boundary or is_pending_boundary:
+            boundary_offset = min(
+                (target_time - current_time) * 0.5,
+                max(0.1, 10.0 * tol_time),
+            )
+            adjusted = target_time - boundary_offset
+            if adjusted > current_time:
+                integration_target = adjusted
+        base_target = integration_target
+        method_in_use = solver_config.method
+        lsoda_used = method_in_use.upper() == "LSODA"
+        sol = None
+        retries = 0
+        max_refine_attempts = 20
+        while True:
+            segment_span = float(integration_target - current_time)
+            if segment_span <= tol_time:
+                current_time = integration_target
+                break
 
-        if not sol.success:
-            raise NumericsError(f"Integration failed at t={current_time}: {sol.message}")
+            mask = (sample_times > current_time + tol_time) & (sample_times <= integration_target - tol_time)
+            segment_samples = sample_times[mask]
+            if segment_samples.size:
+                t_eval = np.unique(np.append(segment_samples, integration_target))
+            else:
+                t_eval = np.array([integration_target], dtype=float)
+
+            segment_max_step = _effective_max_step(model, solver_config, segment_span)
+
+            try:
+                candidate = solve_ivp(
+                    model.rhs,
+                    (current_time, integration_target),
+                    current_state,
+                    method=method_in_use,
+                    rtol=solver_config.rtol,
+                    atol=solver_config.atol,
+                    max_step=segment_max_step,
+                    dense_output=True,
+                    events=event_functions if event_functions else None,
+                    t_eval=t_eval,
+                    vectorized=False,
+                )
+                success = candidate.success
+                message = candidate.message or ""
+            except ValueError as exc:
+                candidate = None
+                success = False
+                message = str(exc)
+            message_lower = message.lower()
+            is_step_issue = ("step size" in message_lower) or ("strictly increasing" in message_lower) or ("strictly decreasing" in message_lower)
+
+            if success:
+                sol = candidate
+                break
+            if is_step_issue and retries < max_refine_attempts:
+                retries += 1
+                span = integration_target - current_time
+                refined_target = current_time + span * 0.5
+                if refined_target <= current_time + tol_time:
+                    refined_target = np.nextafter(integration_target, current_time)
+                if refined_target <= current_time + tol_time:
+                    raise NumericsError(
+                        f"Integration stagnated near t={current_time}: {message}"
+                    )
+                integration_target = refined_target
+                continue
+            if is_step_issue and not lsoda_used:
+                method_in_use = "LSODA"
+                lsoda_used = True
+                retries = 0
+                integration_target = base_target
+                continue
+            if is_step_issue:
+                span = integration_target - current_time
+                tiny_thresh = max(1e-6, 10.0 * tol_time)
+                if span <= tiny_thresh:
+                    for sample_time in segment_samples:
+                        samples[sample_time] = current_state.copy()
+                    samples[integration_target] = current_state.copy()
+                    current_time = integration_target
+                    sol = None
+                    break
+
+            raise NumericsError(f"Integration failed at t={current_time}: {message}")
+
+        if sol is None:
+            continue
 
         triggered_pairs: List[Tuple[float, EventEntry]] = []
         if sol.t_events and event_functions:

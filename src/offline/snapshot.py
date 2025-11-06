@@ -255,9 +255,14 @@ class FrozenModel:
         derivative = np.zeros(len(self.dynamic_indices), dtype=float)
         for ode in self.odes:
             target_idx = self.dynamic_indices.get(ode.identifier)
+            entry = self.species_lookup.get(ode.identifier)
+            if target_idx is None:
+                name_entry = self.species_name_lookup.get(ode.identifier)
+                if name_entry is not None:
+                    entry = name_entry
+                    target_idx = self.dynamic_indices.get(name_entry.identifier)
             if target_idx is None:
                 continue
-            entry = self.species_lookup.get(ode.identifier)
             if entry is not None and entry.boundary_condition:
                 derivative[target_idx] = 0.0
                 continue
@@ -282,19 +287,32 @@ class FrozenModel:
             return {
                 "target": target,
                 "interpreted_dimension": None,
+                "units": None,
                 "compartment": None,
                 "compartment_volume_l": None,
-                "delta_applied": amount,
+                "delta_state_value": amount,
+                "delta_amount_mol": amount,
             }
         delta = amount
-        units_lower = entry.units.lower()
-        dimension_lower = entry.interpreted_dimension.lower()
-        if (
-            "molar" in units_lower
-            or "concentration" in dimension_lower
-            or "amount/vol" in dimension_lower
-            or "/l" in units_lower
-        ):
+        units_lower = (entry.units or "").lower()
+        dimension_lower = (entry.interpreted_dimension or "").lower()
+
+        def _looks_like_concentration() -> bool:
+            if dimension_lower:
+                if any(token in dimension_lower for token in ("concentration", "amount/vol", "mass/vol", "mol/vol")):
+                    return True
+                if dimension_lower in {"amount", "substance", "mass"}:
+                    return False
+            if not units_lower:
+                return False
+            if "molar" in units_lower or "mol/" in units_lower or "mole/" in units_lower:
+                return True
+            if "/" in units_lower:
+                return True
+            return False
+
+        is_concentration = _looks_like_concentration()
+        if is_concentration:
             compartment_name = entry.compartment
             compartment_volume = context.get(compartment_name, self.compartments.get(compartment_name))
             if compartment_volume in (None, 0.0):
@@ -306,9 +324,11 @@ class FrozenModel:
         return {
             "target": entry.identifier,
             "interpreted_dimension": entry.interpreted_dimension,
+            "units": entry.units,
             "compartment": entry.compartment,
             "compartment_volume_l": context.get(entry.compartment, self.compartments.get(entry.compartment)),
-            "delta_applied": delta,
+            "delta_state_value": delta,
+            "delta_amount_mol": amount,
         }
 
     def rhs(self, t: float, y: np.ndarray) -> np.ndarray:
@@ -539,7 +559,8 @@ def _convert_parameter_value(value: float, units: str) -> float:
     if u == "1/(molarity*second)":
         return value * 86400.0
     if u == "1/(micromolarity*nanometer*second)":
-        return value * (1e6) * (1e-9) * 86400.0
+        # Convert uM^-1 * nm^-1 * s^-1 (SimBiology default) into day^-1 with litre-based volumes.
+        return value * 9.8412890625
     return value
 
 
@@ -617,7 +638,10 @@ def _load_reactions(
         expression = str(getattr(row, "kinetic_expression", ""))
         if not expression or expression.lower() == "nan":
             expression = str(getattr(row, "reaction_rate", ""))
-        if expression in fluxes:
+        reaction_name = str(row.name)
+        if reaction_name in fluxes:
+            expression = fluxes[reaction_name]
+        elif expression in fluxes:
             expression = fluxes[expression]
         compiled = _compile_expression(expression, tokens_sorted, safe_names, reverse_safe)
         reactions.append(

@@ -1,0 +1,2 @@
+scenario,surrogate,reference
+A1,artifacts/extended_validation/A1_surrogate.csv,artifacts/extended_validation/A1_reference.csv

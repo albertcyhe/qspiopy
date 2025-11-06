@@ -34,13 +34,24 @@ def test_event_trigger_direction_with_jitter():
 
 
 def test_simulation_time_ordered_events_is_stable():
-    result = simulate_frozen_model("example2", days=5, therapy="anti_pd1")
+    result = simulate_frozen_model(
+        "example2",
+        days=5,
+        therapy="anti_pd1",
+        sample_interval_hours=12.0,
+    )
     assert np.all(result.t_cells >= 0)
 
 
 def test_event_log_schema_empty_when_no_events():
     log: List[dict[str, float]] = []
-    simulate_frozen_model("example1", days=1, therapy="anti_pd1", event_log=log)
+    simulate_frozen_model(
+        "example1",
+        days=1,
+        therapy="anti_pd1",
+        sample_interval_hours=12.0,
+        event_log=log,
+    )
     assert log == []
     frame = pd.DataFrame(log, columns=EVENT_LOG_FIELDS)
     assert list(frame.columns) == list(EVENT_LOG_FIELDS)
@@ -48,7 +59,13 @@ def test_event_log_schema_empty_when_no_events():
 
 def test_event_suite_logs_immediate_and_delayed():
     log: List[dict[str, float]] = []
-    simulate_frozen_model("event_suite", days=10.0, therapy="none", event_log=log)
+    simulate_frozen_model(
+        "event_suite",
+        days=10.0,
+        therapy="none",
+        sample_interval_hours=12.0,
+        event_log=log,
+    )
     types = {entry["type"] for entry in log}
     assert types == {"immediate", "delayed"}
     delays = {round(entry["delay"], 9) for entry in log}

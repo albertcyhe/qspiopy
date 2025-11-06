@@ -183,6 +183,7 @@ result = simulate_frozen_model(
     "example1",
     days=14.0,
     therapy="anti_pd1",
+    sample_interval_hours=12.0,
     extra_outputs=[AUCPlugin()],
 )
 ```
@@ -194,12 +195,25 @@ Programmatic use
 from src.offline.frozen_model import simulate_frozen_model
 
 # Run a frozen snapshot (e.g. example1) in Python
-res = simulate_frozen_model("example1", days=400.0, therapy="anti_pd1", seed=12345, emit_diagnostics=True)
+res = simulate_frozen_model(
+    "example1",
+    days=400.0,
+    therapy="anti_pd1",
+    seed=12345,
+    emit_diagnostics=True,
+    sample_interval_hours=12.0,
+)
 df = res.to_frame()
 
 # Access event logs
 event_log = []
-res = simulate_frozen_model("event_suite", days=10.0, therapy="none", event_log=event_log)
+res = simulate_frozen_model(
+    "event_suite",
+    days=10.0,
+    therapy="none",
+    event_log=event_log,
+    sample_interval_hours=6.0,
+)
 print(event_log[:2])
 ```
 
@@ -207,7 +221,7 @@ Interfaces (Inputs / Outputs)
 -----------------------------
 
 Python API
-- `simulate_frozen_model(snapshot, *, days, therapy, seed=None, emit_diagnostics=False, run_label=None, event_log=None, rtol_override=None, atol_override=None) -> ScenarioResult`
+- `simulate_frozen_model(snapshot, *, days, therapy, sample_interval_hours, seed=None, emit_diagnostics=False, run_label=None, event_log=None, rtol_override=None, atol_override=None) -> ScenarioResult`
   - Inputs:
     - `snapshot` (str): name under `artifacts/matlab_frozen_model/` (e.g. `example1`, `event_suite`).
     - `days` (float): simulation horizon in `configset.TimeUnits` (days by default).
@@ -299,7 +313,7 @@ Adding a new scenario (step‑by‑step)
    ```python
    from pathlib import Path
    from src.offline.frozen_model import simulate_frozen_model
-   df = simulate_frozen_model("<snapshot>", days=400.0, therapy="none").to_frame()
+   df = simulate_frozen_model("<snapshot>", days=400.0, therapy="none", sample_interval_hours=12.0).to_frame()
    Path("artifacts/validation").mkdir(parents=True, exist_ok=True)
    df.to_csv("artifacts/validation/<scenario>_reference.csv", index=False)
    ```

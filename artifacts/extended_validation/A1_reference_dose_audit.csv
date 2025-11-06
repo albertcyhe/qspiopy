@@ -1,0 +1,5 @@
+time_days,time_hours,dose_name,target,interpreted_dimension,units,compartment,compartment_volume_l,delta_state_value,delta_amount_mol,amount_moles,amount_mg,time_unit
+0,0,A1_dose_1,V_C.nivolumab,molarity,molarity,V_C,5,1.39275766016713e-06,1.39275766016713e-06,1.39275766016713e-06,200,day
+21,504,A1_dose_2,V_C.nivolumab,molarity,molarity,V_C,5,1.39275766016713e-06,1.39275766016713e-06,1.39275766016713e-06,200,day
+42,1008,A1_dose_3,V_C.nivolumab,molarity,molarity,V_C,5,1.39275766016713e-06,1.39275766016713e-06,1.39275766016713e-06,200,day
+63,1512,A1_dose_4,V_C.nivolumab,molarity,molarity,V_C,5,1.39275766016713e-06,1.39275766016713e-06,1.39275766016713e-06,200,day

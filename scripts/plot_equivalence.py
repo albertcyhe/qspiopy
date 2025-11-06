@@ -109,6 +109,7 @@ def plot_convergence(
     reference = pd.read_csv(ref_path, comment="#")
 
     columns = [col for col in reference.columns if col != "time_days"]
+    interval = scenario.sample_interval_hours if scenario.sample_interval_hours is not None else 12.0
     baseline = simulate_frozen_model(
         scenario.snapshot,
         days=scenario.stop_time,
@@ -116,6 +117,7 @@ def plot_convergence(
         seed=seed,
         rtol_override=1e-8,
         atol_override=1e-12,
+        sample_interval_hours=interval,
     ).to_frame()
 
     errors = []
@@ -128,6 +130,7 @@ def plot_convergence(
             seed=seed,
             rtol_override=tol,
             atol_override=tol * 1e-2,
+            sample_interval_hours=interval,
         ).to_frame()
         err = _compute_max_rel_err(baseline, result, columns)
         errors.append(max(err, 1e-16))

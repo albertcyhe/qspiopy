@@ -1,0 +1,34 @@
+{
+  "replicates": 50,
+  "reference_seconds": 4.128374958992936,
+  "reference_replicates": 1,
+  "surrogate_seconds": 210.57562379201408,
+  "surrogate_replicates": 50,
+  "grid_debug": {
+    "scenario": "A1",
+    "grid_first_hours": [
+      0.0,
+      12.0,
+      24.0,
+      36.0,
+      48.0,
+      60.0
+    ],
+    "grid_unique_step_hours": [
+      12.0
+    ]
+  },
+  "pk_invariants": {
+    "scenario": "A1",
+    "kel_nivolumab": 0.0124092864,
+    "k12_nivolumab_T": 0.1472256,
+    "k21_nivolumab_T": 51.08238772575944,
+    "k12_nivolumab_LN": 0.0030007584,
+    "k21_nivolumab_LN": 10.916240740217793,
+    "k12_nivolumab_P": 0.0030007584,
+    "k21_nivolumab_P": 0.0002500632,
+    "kel_param": 0.062046432000000006,
+    "kel_estimate_surrogate": 0.01550009423735606,
+    "kel_estimate_reference": 0.06417950108879085
+  }
+}

@@ -6,6 +6,3 @@ tumour_volume_l
 tumour_diameter_cm
 pd1_occupancy
 tcell_density_per_ul
-drug_plasma_molar
-drug_tumor_molar
-pdl1_occupancy
