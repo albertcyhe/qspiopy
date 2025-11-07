@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | **M1 事件语义** | 状态触发 + 同刻顺序 + pre/post 双记录 + ε‑bump + first_step + 事件后 reconcile | ✅ 已实现：schedule 清洁、聚合同刻剂量、延迟事件队列、trigger specs、metadata (`phase_code` 等) |
 | **M2 单位与参数** | `units.py` 统一换算（时间/体积/浓度/速率/剂量），参数派生 | ✅ 已完成：所有时间/体积/流量/kon/koff 路径统一到 day/L/M；`normalise_dose_to_species()` 驱动 `apply_dose()`；ParameterGraph 派生值写入 `unit_normalisation_map` 并可由 `scripts/print_units_table.py` 审计；新增 `tests/test_units.py`、`tests/test_param_graph.py`。**遗留风险**：2D kon 仍依赖 legacy 常数（待几何参数化）；快照若缺药物 MW 则会在 mg 剂量路径上硬 fail；A1 数值门虽然跑通流程但 tumour/occupancy/tcell_density 仍 ❌（语义问题挪至 M3/M4 解决）。 |
-| **M3 初始化与模块化** | 目标体积初始条件、模块化加载 | 🟡 进行中：`initial_conditions.py` + CLI (`--ic-mode target_volume`, `--ic-target-diam-cm`, `--ic-reset-policy`、`--module-block`, `--param-override`) 已合入；`simulate_frozen_model` 支持参数覆盖、模块阻断与 alias 注入；`tests/test_alias_injection.py`（快）与 `tests/test_initial_conditions.py -m slow` 覆盖新功能。**残留**：example1 从单细胞仅能长到 0.012 cm@4000 d，尚无法使用 `ic_mode=target_volume` 跑 A1 门，需调节 reset/preserve 策略或肿瘤生长模块后再启用。 |
+| **M3 初始化与模块化** | 目标体积初始条件、模块化加载 | 🟡 进行中：`simulate_frozen_model` 默认 `ic_mode="target_volume"`（0.5 cm、150 d、`reset_policy="cancer_only"`；不支持的快照自动退回 snapshot 初值），CLI 暴露 `--ic-mode/--ic-target-diam-cm/--ic-max-days/--ic-max-wall-seconds`；别名注入、参数覆盖、模块阻断与 `tests/test_alias_injection.py`（快）/`tests/test_initial_conditions.py -m slow`（显式）均已落地。**残留**：snapshot 初值仍会因为状态触发事件缺少完整迟滞而卡在 t=0，需补齐“触发→退回→再触发”的防抖语义（计划在轻量诊断场景中调试），之后再把 `ic_mode=snapshot` 作为 A 系列默认。 |
 | **M4 多克隆与动态体积** | 体积/伪进展输出 & 克隆竞争 | ⏳ 未开始 |
 | **M5 验收/CI** | 组件测试 + 数值门绿灯 + CI | ⏳ 进行中（validate_surrogate 现已稳定，但 A1 数值门仍未过） |
 
@@ -18,7 +18,13 @@
 **最新实测（2025-11-07）**
 
 - MATLAB 参考已用 `/Volumes/AlbertSSD/Applications/MATLAB_R2023b.app/bin/matlab` 重新生成（`python -m scripts.run_alignment_suite --scenarios A1 --output artifacts/validation`）。
-- `python -m scripts.validate_surrogate --scenarios A1 --dump-t0 --numeric-gates`（当前仍用 `ic_mode=snapshot`，因为 target-volume IC 尚未达标）：tumour_volume_l rel_L2≈1.4e-1、pd1_occupancy rel_L2=1.0、tcell_density rel_L2≈0.79。下一步将在调通 target-volume IC 后，改用 `python -m scripts.validate_surrogate --scenarios A1 --ic-mode target_volume --ic-target-diam-cm <calibrated> --dump-t0 --numeric-gates ...` 重新评估。
+- `python -m scripts.validate_surrogate --scenarios A1 --dump-t0 --numeric-gates`：当前仍以 `ic_mode=snapshot` 运行以便直接对照 frozen snapshot（默认 CLI 已改为 `ic_mode=target_volume`；snapshot 路径需等迟滞补完后再启用），tumour_volume_l rel_L2≈1.4e-1、pd1_occupancy rel_L2=1.0、tcell_density rel_L2≈0.79。待状态触发事件的迟滞语义在轻量诊断场景验证通过后，再用 `--ic-mode snapshot` 复测；在此之前，验证/runner 默认使用 `--ic-mode target_volume --ic-target-diam-cm 0.5 --ic-max-days 150 --ic-reset-policy cancer_only`。
+
+**M3 剩余重点**
+
+1. 状态触发事件迟滞/防抖：触发一次后必须“退回安全区”再触发（包含 ε‑bump、armed state、时间抑制窗）。
+2. 轻量诊断场景：构造最小 ODE + 状态事件测试，确保迟滞逻辑不会在 t≈0 重复触发。
+3. Snapshot IC 复用：上述两项完成后，再把 `ic_mode=snapshot` 作为默认，并重新跑 A/B 系列。
 
 ---
 
