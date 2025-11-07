@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -15,6 +16,8 @@ from scipy.integrate import solve_ivp
 
 from .entities import BASE_HEADER, DoseEntry, EventEntry, ScenarioResult, ScheduledDose, SEMANTICS_VERSION
 from .errors import AlignmentFail, ConfigError, NumericsError, SnapshotError
+from .initial_conditions import ICOptions, generate_initial_conditions
+from .modules import apply_parameter_overrides, disable_repeated_assignments
 from .snapshot import FrozenModel, load_frozen_model
 from .units import convert_amount
 from .segment_integrator import SolverConfig, ScheduledEvent, TriggerEventSpec, run_segmented_integration
@@ -237,7 +240,36 @@ def _record_solution_samples(
         model.evaluate_repeated_assignments(ctx)
         model.apply_algebraic_rules(ctx, vec, mutate=False)
         model.sync_state_from_context(ctx, vec)
+        _inject_output_aliases(ctx)
         samples[key] = vec
+
+
+def _inject_output_aliases(context: Dict[str, float]) -> None:
+    """Populate canonical keys expected by downstream outputs."""
+
+    if "H_PD1_C1" not in context:
+        for candidate in ("H_PD1", "PD1_OCCUPANCY", "pd1_occupancy", "H_PD1_TOTAL"):
+            if candidate in context:
+                context["H_PD1_C1"] = context[candidate]
+                break
+
+    if "V_T.T1" not in context:
+        for candidate in ("T", "T_total", "T_tumour", "CD8_T_cells"):
+            if candidate in context:
+                context["V_T.T1"] = context[candidate]
+                break
+
+    if "C_x" not in context:
+        for candidate in ("C_dead", "Cdead", "C_D", "dead_cells"):
+            if candidate in context:
+                context["C_x"] = context[candidate]
+                break
+
+    if "V_T" not in context:
+        for candidate in ("tumor_volume_l", "tumour_volume_l", "Vtumour"):
+            if candidate in context:
+                context["V_T"] = context[candidate]
+                break
 
 
 def _perform_t0_quick_check(model: FrozenModel, state: np.ndarray, context: Dict[str, float]) -> None:
@@ -385,6 +417,10 @@ def simulate_frozen_model(
     custom_doses: Optional[Sequence[DoseEntry]] = None,
     context_outputs: Optional[Mapping[str, str]] = None,
     dose_audit: Optional[List[Dict[str, object]]] = None,
+    ic_mode: str = "snapshot",
+    ic_options: Optional[ICOptions] = None,
+    param_overrides: Optional[Dict[str, float]] = None,
+    module_blocks: Optional[Sequence[str]] = None,
 ) -> ScenarioResult:
     try:
         model = load_frozen_model(snapshot)
@@ -392,6 +428,9 @@ def simulate_frozen_model(
         raise SnapshotError(str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         raise SnapshotError(f"Failed to load snapshot '{snapshot}': {exc}") from exc
+
+    if param_overrides or module_blocks:
+        model = copy.deepcopy(model)
 
     solver_options = model.config.get("SolverOptions", {}) or {}
     rel_tol = rtol_override if rtol_override is not None else solver_options.get("RelativeTolerance", 1e-7)
@@ -426,8 +465,19 @@ def simulate_frozen_model(
     if seed is not None:
         np.random.seed(seed)
 
-    state = model.initial_state().astype(float)
-    model.apply_initial_assignments_to_state(state)
+    if param_overrides:
+        apply_parameter_overrides(model, dict(param_overrides))
+    if module_blocks:
+        disable_repeated_assignments(model, module_blocks)
+
+    if ic_mode == "target_volume":
+        ic_opts = ic_options or ICOptions(target_diameter_cm=2.0)
+        state, context = generate_initial_conditions(model, opts=ic_opts)
+        _inject_output_aliases(context)
+    else:
+        state = model.initial_state().astype(float)
+        model.apply_initial_assignments_to_state(state)
+        context = None
 
     if event_log is not None:
         event_log.clear()
@@ -441,9 +491,10 @@ def simulate_frozen_model(
         model.evaluate_repeated_assignments(ctx)
         model.apply_algebraic_rules(ctx, vec, mutate=False)
         model.sync_state_from_context(ctx, vec)
+        _inject_output_aliases(ctx)
         return ctx
 
-    context = reconcile(state)
+    context = context or reconcile(state)
     _perform_t0_quick_check(model, state, context)
 
     samples: Dict[float, np.ndarray] = {}
@@ -617,6 +668,7 @@ def simulate_frozen_model(
         model.evaluate_repeated_assignments(ctx)
         model.apply_algebraic_rules(ctx, vec, mutate=False)
         model.sync_state_from_context(ctx, vec)
+        _inject_output_aliases(ctx)
         contexts.append(dict(ctx))
 
         c_cells = ctx.get("C1", 0.0)
