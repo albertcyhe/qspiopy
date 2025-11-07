@@ -445,7 +445,12 @@ def _enforce_numeric_gates(
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate the Python surrogate against the reference equations")
     parser.add_argument("--output", type=Path, default=Path("artifacts/validation"))
-    parser.add_argument("--replicates", type=int, default=50, help="Number of runs for the performance benchmark")
+    parser.add_argument(
+        "--benchmark-replicates",
+        type=int,
+        default=0,
+        help="Number of runs for the optional performance benchmark (0 disables it)",
+    )
     parser.add_argument(
         "--max-rel-err",
         type=float,
@@ -561,14 +566,18 @@ def main(argv: Iterable[str] | None = None) -> int:
         pk_frame = pd.DataFrame(pk_records)
         pk_frame.to_csv(args.output / "pk_invariants.csv", index=False)
 
-    benchmark = _performance_benchmark((Path("parameters/example1_parameters.json"),), args.replicates)
-    benchmark_payload = {"replicates": args.replicates, **benchmark}
-    if grid_records:
-        benchmark_payload["grid_debug"] = grid_records[0]
-    if pk_records:
-        benchmark_payload["pk_invariants"] = pk_records[0]
-    with (args.output / "performance.json").open("w", encoding="utf8") as handle:
-        json.dump(benchmark_payload, handle, indent=2)
+    if args.benchmark_replicates > 0:
+        benchmark = _performance_benchmark(
+            (Path("parameters/example1_parameters.json"),),
+            args.benchmark_replicates,
+        )
+        benchmark_payload = {"replicates": args.benchmark_replicates, **benchmark}
+        if grid_records:
+            benchmark_payload["grid_debug"] = grid_records[0]
+        if pk_records:
+            benchmark_payload["pk_invariants"] = pk_records[0]
+        with (args.output / "performance.json").open("w", encoding="utf8") as handle:
+            json.dump(benchmark_payload, handle, indent=2)
 
     registry_df = pd.DataFrame(results)
     registry_df.to_csv(args.output / "artefacts.csv", index=False)
