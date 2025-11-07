@@ -81,6 +81,7 @@ class FrozenModel:
         self.time_unit = time_unit
         self.solver_type = solver_type
         self.provenance = provenance
+        self._jacobian_sparsity: Optional[np.ndarray] = None
 
     # --- state/context manipulation -------------------------------------------------
 
@@ -173,6 +174,49 @@ class FrozenModel:
             context[target] = value
             return
         context[target] = value
+
+    def _resolve_dynamic_index(self, symbol: str) -> Optional[int]:
+        idx = self.dynamic_indices.get(symbol)
+        if idx is not None:
+            return idx
+        entry = self.species_lookup.get(symbol)
+        if entry and entry.identifier in self.dynamic_indices:
+            return self.dynamic_indices[entry.identifier]
+        named = self.species_name_lookup.get(symbol)
+        if named and named.identifier in self.dynamic_indices:
+            return self.dynamic_indices[named.identifier]
+        return None
+
+    def _build_jacobian_sparsity(self) -> np.ndarray:
+        size = len(self.dynamic_indices)
+        pattern = np.zeros((size, size), dtype=bool)
+
+        def mark(row_identifier: str, tokens: Sequence[str]) -> None:
+            row_idx = self._resolve_dynamic_index(row_identifier)
+            if row_idx is None:
+                return
+            for token in tokens:
+                col_idx = self._resolve_dynamic_index(token)
+                if col_idx is not None:
+                    pattern[row_idx, col_idx] = True
+
+        for ode in self.odes:
+            if ode.compiled is None:
+                continue
+            mark(ode.identifier, ode.compiled.tokens)
+
+        for rule in self.rate_rules:
+            if rule.compiled is None:
+                continue
+            mark(rule.target, rule.compiled.tokens)
+
+        np.fill_diagonal(pattern, True)
+        return pattern
+
+    def jacobian_sparsity(self) -> np.ndarray:
+        if self._jacobian_sparsity is None:
+            self._jacobian_sparsity = self._build_jacobian_sparsity()
+        return self._jacobian_sparsity
 
     def _apply_target_value(
         self, target: str, value: float, context: Dict[str, float], state: Optional[np.ndarray] = None

@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import heapq
 import json
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Protocol
 
 import numpy as np
@@ -17,6 +16,11 @@ from scipy.integrate import solve_ivp
 from .entities import BASE_HEADER, DoseEntry, EventEntry, ScenarioResult, ScheduledDose, SEMANTICS_VERSION
 from .errors import AlignmentFail, ConfigError, NumericsError, SnapshotError
 from .snapshot import FrozenModel, load_frozen_model
+from .segment_integrator import (
+    SolverConfig,
+    ScheduledEvent,
+    run_segmented_integration,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,28 @@ EVENT_LOG_FIELDS = (
 _TIME_TOL = 1e-9
 _T0_REL_TOL = 1e-9
 _T0_ABS_TOL = 1e-12
+_TIME_KEY_DIGITS = 12
+_MAX_SEG_ATTEMPTS = 8
+_MICRO_SNAP = 5e-9
+
+
+def _tkey(value: float) -> float:
+    """Quantise time points before using as dictionary keys."""
+    quantised = round(float(value), _TIME_KEY_DIGITS)
+    return float(np.nextafter(quantised, np.inf))
+
+
+def _merge_close_times(times: np.ndarray) -> np.ndarray:
+    """Merge nearly-identical time stamps (≤1 ULP apart)."""
+    if times.size == 0:
+        return times
+    ordered = np.sort(np.asarray(times, dtype=float))
+    merged = [ordered[0]]
+    for current in ordered[1:]:
+        if current <= np.nextafter(merged[-1], np.inf):
+            continue
+        merged.append(current)
+    return np.asarray(merged, dtype=float)
 
 
 class ExtraOutputs(Protocol):
@@ -62,30 +88,6 @@ class DoseScheduler(Protocol):
         ...
 
 
-@dataclass(frozen=True)
-class SolverConfig:
-    """Configuration driving scipy's solve_ivp."""
-
-    method: str
-    rtol: float
-    atol: float
-    max_step: float
-    seed: Optional[int]
-
-    def as_dict(self) -> Dict[str, object]:
-        return {
-            "method": self.method,
-            "rtol": self.rtol,
-            "atol": self.atol,
-            "max_step": self.max_step,
-            "seed": self.seed,
-        }
-
-    def identity(self) -> str:
-        payload = json.dumps(self.as_dict(), sort_keys=True)
-        return hashlib.sha256(payload.encode("utf8")).hexdigest()
-
-
 @dataclass
 class ContextKeyOutputs:
     """Adapter for legacy context-key extraction."""
@@ -107,16 +109,6 @@ class ContextKeyOutputs:
         for column, key in self.mapping.items():
             results[column] = np.array([ctx.get(key, 0.0) for ctx in contexts], dtype=float)
         return results
-
-
-@dataclass(frozen=True, order=True)
-class ScheduledEvent:
-    time: float
-    priority: int
-    entry: EventEntry = field(compare=False)
-    trigger_time: float = field(compare=False)
-    delay: float = field(compare=False)
-    assignments: str = field(compare=False)
 
 
 def _enumerate_dose_times(dose: DoseEntry, days: float) -> List[float]:
@@ -183,6 +175,40 @@ def _materialise_schedule(doses: Sequence[DoseEntry], days: float) -> List[Sched
     return schedule
 
 
+def _dedupe_scheduled_doses(
+    scheduled: Sequence[ScheduledDose],
+    tol: float = 1e-12,
+) -> List[ScheduledDose]:
+    seen: set = set()
+    result: List[ScheduledDose] = []
+    for item in sorted(scheduled, key=lambda s: (round(s.time, 12), s.priority, s.dose.name)):
+        key = (
+            round(float(item.time), 12),
+            item.dose.name,
+            item.dose.target,
+            round(float(item.amount or 0.0), 15),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _guard_single_t0_doses(scheduled: Sequence[ScheduledDose], tol: float = 1e-12) -> List[ScheduledDose]:
+    seen: set = set()
+    guarded: List[ScheduledDose] = []
+    for item in scheduled:
+        if abs(item.time) <= tol:
+            key = item.dose.target
+            if key in seen:
+                logger.warning("drop duplicate t=0 dose for target %s", key)
+                continue
+            seen.add(key)
+        guarded.append(item)
+    return guarded
+
+
 def _record_solution_samples(
     samples: Dict[float, np.ndarray],
     sample_times: np.ndarray,
@@ -195,8 +221,10 @@ def _record_solution_samples(
 ) -> None:
     if sol.sol is None:
         return
-    for t_sample in sample_times:
-        if t_sample in samples:
+    candidate_times = _merge_close_times(sample_times)
+    for t_sample in candidate_times:
+        key = _tkey(t_sample)
+        if key in samples:
             continue
         if t_sample <= start + _TIME_TOL:
             continue
@@ -211,7 +239,7 @@ def _record_solution_samples(
         model.evaluate_repeated_assignments(ctx)
         model.apply_algebraic_rules(ctx, vec, mutate=False)
         model.sync_state_from_context(ctx, vec)
-        samples[t_sample] = vec
+        samples[key] = vec
 
 
 def _perform_t0_quick_check(model: FrozenModel, state: np.ndarray, context: Dict[str, float]) -> None:
@@ -407,6 +435,7 @@ def simulate_frozen_model(
         event_log.clear()
 
     sample_times = _sample_times(days, sample_interval_hours)
+    sample_times = _merge_close_times(sample_times)
     tol_time = _TIME_TOL
 
     def reconcile(vec: np.ndarray) -> Dict[str, float]:
@@ -420,7 +449,7 @@ def simulate_frozen_model(
     _perform_t0_quick_check(model, state, context)
 
     samples: Dict[float, np.ndarray] = {}
-    samples[0.0] = state.copy()
+    samples[_tkey(0.0)] = state.copy()
 
     therapy_flag = therapy.lower()
     base_doses = list(custom_doses) if custom_doses is not None else (
@@ -431,9 +460,22 @@ def simulate_frozen_model(
         scheduled_list = list(scheduler.build(base_doses, model=model, days=days))
     else:
         scheduled_list = _materialise_schedule(base_doses, days)
+    scheduled_list = _dedupe_scheduled_doses(scheduled_list)
+    scheduled_list = _guard_single_t0_doses(scheduled_list)
 
     if not scheduled_list and therapy_flag == "anti_pd1" and custom_doses is None:
-        scheduled_list.extend(_fallback_anti_pd1_doses(model, days))
+        existing_signatures = {
+            (dose.dose.name, dose.dose.target, round(dose.time, 6), round(dose.dose.amount or 0.0, 12))
+            for dose in scheduled_list
+        }
+        fallback = _fallback_anti_pd1_doses(model, days)
+        filtered = [
+            dose
+            for dose in fallback
+            if (dose.dose.name, dose.dose.target, round(dose.time, 6), round(dose.dose.amount or 0.0, 12))
+            not in existing_signatures
+        ]
+        scheduled_list.extend(filtered)
 
     scheduled_list.sort(key=lambda item: (item.time, item.priority))
     dose_index = 0
@@ -467,7 +509,8 @@ def simulate_frozen_model(
                 "interpreted_dimension": info.get("interpreted_dimension"),
                 "compartment": info.get("compartment"),
                 "compartment_volume_l": info.get("compartment_volume_l"),
-                "delta_applied": info.get("delta_applied"),
+                "delta_state_value": info.get("delta_state_value"),
+                "delta_amount_mol": info.get("delta_amount_mol"),
                 "amount_moles": scheduled_dose.amount,
                 "amount_mg": scheduled_dose.amount_mg,
                 "time_unit": model.time_unit,
@@ -478,7 +521,7 @@ def simulate_frozen_model(
         scheduled_dose = scheduled_list[dose_index]
         audit_info = model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
         context = reconcile(current_state)
-        samples[0.0] = current_state.copy()
+        samples[_tkey(0.0)] = current_state.copy()
         record_dose_audit(0.0, scheduled_dose, audit_info)
         logger.info(
             "dose_event time=%g target=%s amount=%g",
@@ -488,230 +531,40 @@ def simulate_frozen_model(
         )
         dose_index += 1
 
-    current_time = 0.0
+    jac_pattern = model.jacobian_sparsity()
 
-    while current_time < days - tol_time:
-        next_dose_time = scheduled_list[dose_index].time if dose_index < len(scheduled_list) else float("inf")
-        next_event_time = pending_events[0].time if pending_events else float("inf")
-        target_time = min(days, next_dose_time, next_event_time)
-        is_dose_boundary = dose_index < len(scheduled_list) and abs(next_dose_time - target_time) <= tol_time
-        is_pending_boundary = pending_events and abs(next_event_time - target_time) <= tol_time
+    current_state, context, current_time, dose_index = run_segmented_integration(
+        model=model,
+        solver_config=solver_config,
+        scheduled_doses=scheduled_list,
+        pending_events=pending_events,
+        event_functions=event_functions,
+        sample_times=sample_times,
+        samples=samples,
+        state=current_state,
+        context=context,
+        start_time=0.0,
+        stop_time=days,
+        dose_index=dose_index,
+        tol_time=tol_time,
+        record_solution_samples=_record_solution_samples,
+        record_dose_audit=record_dose_audit,
+        reconcile=reconcile,
+        time_key=_tkey,
+        event_log=event_log,
+        jac_sparsity=jac_pattern,
+    )
 
-        if target_time <= current_time + tol_time:
-            current_time = target_time
-            while pending_events and abs(pending_events[0].time - current_time) <= tol_time:
-                scheduled_event = heapq.heappop(pending_events)
-                for assignment in scheduled_event.entry.assignments:
-                    value = assignment.compiled.evaluate(context) if assignment.compiled is not None else 0.0
-                    model._apply_target_value(assignment.target, value, context, current_state)
-                context = reconcile(current_state)
-                samples[current_time] = current_state.copy()
-            while dose_index < len(scheduled_list) and scheduled_list[dose_index].time <= current_time + tol_time:
-                scheduled_dose = scheduled_list[dose_index]
-                audit_info = model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
-                context = reconcile(current_state)
-                samples[current_time] = current_state.copy()
-                record_dose_audit(current_time, scheduled_dose, audit_info)
-                logger.info(
-                    "dose_event time=%g target=%s amount=%g",
-                    scheduled_dose.time,
-                    scheduled_dose.dose.target,
-                    scheduled_dose.amount,
-                )
-                dose_index += 1
-            continue
-
-        integration_target = target_time
-        if is_dose_boundary or is_pending_boundary:
-            boundary_offset = min(
-                (target_time - current_time) * 0.5,
-                max(0.1, 10.0 * tol_time),
-            )
-            adjusted = target_time - boundary_offset
-            if adjusted > current_time:
-                integration_target = adjusted
-        base_target = integration_target
-        method_in_use = solver_config.method
-        lsoda_used = method_in_use.upper() == "LSODA"
-        sol = None
-        retries = 0
-        max_refine_attempts = 20
-        while True:
-            segment_span = float(integration_target - current_time)
-            if segment_span <= tol_time:
-                current_time = integration_target
-                break
-
-            mask = (sample_times > current_time + tol_time) & (sample_times <= integration_target - tol_time)
-            segment_samples = sample_times[mask]
-            if segment_samples.size:
-                t_eval = np.unique(np.append(segment_samples, integration_target))
-            else:
-                t_eval = np.array([integration_target], dtype=float)
-
-            segment_max_step = _effective_max_step(model, solver_config, segment_span)
-
-            try:
-                candidate = solve_ivp(
-                    model.rhs,
-                    (current_time, integration_target),
-                    current_state,
-                    method=method_in_use,
-                    rtol=solver_config.rtol,
-                    atol=solver_config.atol,
-                    max_step=segment_max_step,
-                    dense_output=True,
-                    events=event_functions if event_functions else None,
-                    t_eval=t_eval,
-                    vectorized=False,
-                )
-                success = candidate.success
-                message = candidate.message or ""
-            except ValueError as exc:
-                candidate = None
-                success = False
-                message = str(exc)
-            message_lower = message.lower()
-            is_step_issue = ("step size" in message_lower) or ("strictly increasing" in message_lower) or ("strictly decreasing" in message_lower)
-
-            if success:
-                sol = candidate
-                break
-            if is_step_issue and retries < max_refine_attempts:
-                retries += 1
-                span = integration_target - current_time
-                refined_target = current_time + span * 0.5
-                if refined_target <= current_time + tol_time:
-                    refined_target = np.nextafter(integration_target, current_time)
-                if refined_target <= current_time + tol_time:
-                    raise NumericsError(
-                        f"Integration stagnated near t={current_time}: {message}"
-                    )
-                integration_target = refined_target
-                continue
-            if is_step_issue and not lsoda_used:
-                method_in_use = "LSODA"
-                lsoda_used = True
-                retries = 0
-                integration_target = base_target
-                continue
-            if is_step_issue:
-                span = integration_target - current_time
-                tiny_thresh = max(1e-6, 10.0 * tol_time)
-                if span <= tiny_thresh:
-                    for sample_time in segment_samples:
-                        samples[sample_time] = current_state.copy()
-                    samples[integration_target] = current_state.copy()
-                    current_time = integration_target
-                    sol = None
-                    break
-
-            raise NumericsError(f"Integration failed at t={current_time}: {message}")
-
-        if sol is None:
-            continue
-
-        triggered_pairs: List[Tuple[float, EventEntry]] = []
-        if sol.t_events and event_functions:
-            for idx, times in enumerate(sol.t_events):
-                for time_val in np.atleast_1d(times):
-                    triggered_pairs.append((float(time_val), model.events[idx]))
-
-        if triggered_pairs:
-            triggered_pairs.sort(key=lambda pair: (pair[0], pair[1].index))
-            event_time = triggered_pairs[0][0]
-            _record_solution_samples(samples, sample_times, current_time, event_time, sol, model, inclusive=False)
-            if sol.sol is not None:
-                current_state = np.asarray(sol.sol(event_time), dtype=float)
-            else:
-                idx = int(np.argmin(np.abs(sol.t - event_time)))
-                current_state = np.asarray(sol.y[:, idx], dtype=float)
-            context = reconcile(current_state)
-            same_time_entries = [entry for time_val, entry in triggered_pairs if abs(time_val - event_time) <= tol_time]
-            for entry in same_time_entries:
-                assignments_text = entry.assignments_text
-                delay_value = 0.0
-                if entry.delay_compiled is not None:
-                    delay_value = float(entry.delay_compiled.evaluate(context))
-                if entry.delay_type == "time" and delay_value > tol_time:
-                    scheduled_time = event_time + delay_value
-                    heapq.heappush(
-                        pending_events,
-                        ScheduledEvent(
-                            time=scheduled_time,
-                            priority=entry.index,
-                            entry=entry,
-                            trigger_time=event_time,
-                            delay=delay_value,
-                            assignments=assignments_text,
-                        ),
-                    )
-                    continue
-                if event_log is not None:
-                    event_log.append(
-                        {
-                            "event_index": entry.index,
-                            "time_fire": event_time,
-                            "time_trigger": event_time,
-                            "delay": delay_value,
-                            "type": "immediate",
-                            "assignments": assignments_text,
-                        }
-                    )
-                for assignment in entry.assignments:
-                    value = assignment.compiled.evaluate(context) if assignment.compiled is not None else 0.0
-                    model._apply_target_value(assignment.target, value, context, current_state)
-                context = reconcile(current_state)
-            samples[event_time] = current_state.copy()
-            current_time = event_time
-        else:
-            t_end = float(sol.t[-1])
-            _record_solution_samples(samples, sample_times, current_time, t_end, sol, model, inclusive=True)
-            current_state = np.asarray(sol.y[:, -1], dtype=float)
-            context = reconcile(current_state)
-            current_time = t_end
-
-        while pending_events and abs(pending_events[0].time - current_time) <= tol_time:
-            scheduled_event = heapq.heappop(pending_events)
-            if event_log is not None:
-                event_log.append(
-                    {
-                        "event_index": scheduled_event.entry.index,
-                        "time_fire": current_time,
-                        "time_trigger": scheduled_event.trigger_time,
-                        "delay": scheduled_event.delay,
-                        "type": "delayed",
-                        "assignments": scheduled_event.assignments,
-                    }
-                )
-            for assignment in scheduled_event.entry.assignments:
-                value = assignment.compiled.evaluate(context) if assignment.compiled is not None else 0.0
-                model._apply_target_value(assignment.target, value, context, current_state)
-            context = reconcile(current_state)
-            samples[current_time] = current_state.copy()
-
-        while dose_index < len(scheduled_list) and scheduled_list[dose_index].time <= current_time + tol_time:
-            scheduled_dose = scheduled_list[dose_index]
-            audit_info = model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
-            context = reconcile(current_state)
-            samples[current_time] = current_state.copy()
-            record_dose_audit(current_time, scheduled_dose, audit_info)
-            logger.info(
-                "dose_event time=%g target=%s amount=%g",
-                scheduled_dose.time,
-                scheduled_dose.dose.target,
-                scheduled_dose.amount,
-            )
-            dose_index += 1
-
-    if current_time not in samples:
-        samples[current_time] = current_state.copy()
+    current_key = _tkey(current_time)
+    if current_key not in samples:
+        samples[current_key] = current_state.copy()
 
     output_states = []
     last_state = current_state.copy()
     for t_val in sample_times:
-        if t_val in samples:
-            last_state = samples[t_val]
+        key = _tkey(t_val)
+        if key in samples:
+            last_state = samples[key]
         output_states.append(last_state.copy())
     states = np.vstack(output_states)
 

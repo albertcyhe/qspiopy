@@ -1,8 +1,8 @@
 {
   "replicates": 50,
-  "reference_seconds": 4.128374958992936,
+  "reference_seconds": 1.645966749987565,
   "reference_replicates": 1,
-  "surrogate_seconds": 210.57562379201408,
+  "surrogate_seconds": 83.92208145797485,
   "surrogate_replicates": 50,
   "grid_debug": {
     "scenario": "A1",
@@ -28,7 +28,6 @@
     "k12_nivolumab_P": 0.0030007584,
     "k21_nivolumab_P": 0.0002500632,
     "kel_param": 0.062046432000000006,
-    "kel_estimate_surrogate": 0.01550009423735606,
     "kel_estimate_reference": 0.06417950108879085
   }
 }
