@@ -24,6 +24,7 @@ from .entities import (
     SpeciesEntry,
 )
 from .errors import SnapshotError
+from .param_graph import ParameterGraph
 from .units import convert_amount, convert_parameter_value, convert_volume
 
 
@@ -562,27 +563,30 @@ def _load_species(path: Path) -> Tuple[List[SpeciesEntry], Dict[str, float], Lis
     return species, constants, tokens
 
 
-def _load_parameters(path: Path) -> Tuple[Dict[str, float], List[str]]:
+def _load_parameters(path: Path) -> Tuple[Dict[str, float], List[str], Dict[str, Dict[str, object]]]:
     rows = _load_rows(path)
-    base_params: Dict[str, float] = {}
-    derived_specs: List[Dict[str, object]] = []
+    graph = ParameterGraph(convert_parameter_value)
     order: List[str] = []
     for row in rows:
         name = str(row.get("name"))
         units = str(row.get("units", "")) if row.get("units") is not None else ""
         value = row.get("value")
         if value is None:
-            derived_specs.append(row)
+            graph.add_spec(
+                name=name,
+                unit=units,
+                expression=row.get("expression", "") or "",
+                dependencies=[str(dep) for dep in row.get("derived_from", []) or []],
+                value=None,
+            )
             continue
-        converted = convert_parameter_value(float(value), units)
-        base_params[name] = converted
+        graph.add_base(name, float(value), units)
         order.append(name)
-    resolved = _evaluate_derived_parameters(base_params, derived_specs)
-    for spec in derived_specs:
-        name = str(spec.get("name"))
-        if name in resolved and name not in order:
+    resolved = graph.evaluate()
+    for name in graph.metadata:
+        if name not in order:
             order.append(name)
-    return resolved, order
+    return resolved, order, graph.metadata
 
 
 def _load_compartments(path: Path) -> Tuple[Dict[str, float], List[str]]:
@@ -604,45 +608,6 @@ def _convert_compartment_value(value: float, units: str) -> float:
 
 def _convert_parameter_value(value: float, units: str) -> float:
     return convert_parameter_value(value, units)
-
-
-def _evaluate_derived_parameters(
-    base_params: Dict[str, float],
-    derived_specs: Sequence[Dict[str, object]],
-) -> Dict[str, float]:
-    resolved = dict(base_params)
-    remaining = list(derived_specs)
-
-    def _evaluate_expression(expr: str, values: Sequence[float]) -> float:
-        substituted = expr
-        for idx, val in enumerate(values, start=1):
-            substituted = substituted.replace(f"p({idx})", f"({val})")
-        safe_locals = {"__builtins__": None, "pi": math.pi, "e": math.e}
-        return float(eval(substituted, safe_locals, {}))
-
-    while remaining:
-        progress = False
-        for spec in list(remaining):
-            name = str(spec.get("name"))
-            deps = [str(dep) for dep in spec.get("derived_from", []) or []]
-            if any(dep not in resolved for dep in deps):
-                continue
-            expr = spec.get("expression")
-            units = str(spec.get("units", "")) if spec.get("units") is not None else ""
-            if expr:
-                values = [resolved[dep] for dep in deps]
-                raw_value = _evaluate_expression(expr, values)
-            elif spec.get("value") is not None:
-                raw_value = float(spec.get("value"))
-            else:
-                continue
-            resolved[name] = convert_parameter_value(raw_value, units)
-            remaining.remove(spec)
-            progress = True
-        if not progress:
-            unresolved = [str(spec.get("name")) for spec in remaining]
-            raise SnapshotError(f"Unable to resolve derived parameters: {unresolved}")
-    return resolved
 
 
 def _load_rules(
@@ -973,7 +938,7 @@ def _load_frozen_model_cached(model_dir_str: str) -> FrozenModel:
         raise FileNotFoundError(f"Snapshot directory {model_dir} is missing. Run export_matlab_snapshot first.")
 
     species, constant_species, species_tokens = _load_species(model_dir / "species.csv")
-    parameters, parameter_tokens = _load_parameters(model_dir / "parameters.csv")
+    parameters, parameter_tokens, parameter_meta = _load_parameters(model_dir / "parameters.csv")
     compartments, compartment_tokens = _load_compartments(model_dir / "compartments.csv")
     config = _load_configset(model_dir / "configset.json")
 
@@ -1033,6 +998,7 @@ def _load_frozen_model_cached(model_dir_str: str) -> FrozenModel:
         "sympy_version": sp.__version__,
         "parser_flags": "default_v1",
         "units_map": json.dumps(species_units, sort_keys=True),
+        "parameter_graph": json.dumps(parameter_meta, sort_keys=True, default=str),
     }
 
     return FrozenModel(

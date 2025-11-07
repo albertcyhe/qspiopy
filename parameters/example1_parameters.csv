@@ -1,0 +1,132 @@
+name,value,units,description,source,derived_from,expression
+V_C,5.0,liter,Central compartment volume,doi: 10.1002/psp4.12040,,
+V_P,60.0,liter,Peripheral compartment volume,estimated,,
+V_Tmin,0.001,microliter,Cancer-free Tumour compartment volume,estimated,,
+V_LN,,liter,Lymph Node compartment volume,derived,"['nLNs', 'D_LN']",p(1)*4/3*pi*(p(2)/2)^3
+gamma_P,0.0067,dimensionless,Peripheral Blood Volume Fraction,estimated,,
+gamma_T,0.0067,dimensionless,Tumour Blood Volume Fraction,estimated,,
+vol_cell,,micrometer^3/cell,Volume of a single cancer cell,derived,"['D_cell', 'cell']",4/3*pi*(p(1)/2)^3/p(2)
+vol_Tcell,176.0,micrometer^3/cell,Volume of a single T cell,doi: 10.1136/jcp.34.10.1083,,
+k_cell_clear,0.03,1/day,Rate of clearence of dead cancer cells,estimated,,
+k_C_growth,0.012,1/day,Cancer cell growth rate,doi: 10.1208/s12248-019-0302-5,,
+C_max,,cell,Cancer cell capacity,derived,"['D_T_max', 'rho_cell']",4*pi/3*(p(1)/2)^3*p(2)
+k_C_death,1e-05,1/day,Cancer cell death rate,PMID: 3156189,,
+initial_tumour_diameter,3.0,centimeter,Inital Tumour Diameter,estimated based on trials,,
+div,1110000.0,dimensionless,T cell Diversity,doi: 10.1182/blood-2009-04-217604,,
+div_Treg,1160000.0,dimensionless,Treg Diversity,doi: 10.1182/blood-2009-04-217604,,
+n_clones,100.0,dimensionless,T cell Clonality,doi: 10.1038/psp.2014.30,,
+n_clones_Treg,1000.0,dimensionless,Treg Clonality,doi: 10.1038/psp.2014.30,,
+Q_nT_thym,3200000000.0,cell/day,Rate of Naive T Cell Output from the Thymus,doi: 10.4049/jimmunol.0900743,,
+Q_nT_thym_Treg,,cell,Rate of Naive Treg Output from the Thymus,derived,"['nTreg_C', 'k_death_Treg']",p(1)*p(2)
+q_LN_in,0.07,1/day/milliliter,Rate of T Cell Lymph Node Entry,doi: 10.1038/psp.2014.30,,
+q_LN_out,1.13,1/day,Rate of T Cell Lymph Node Exit,doi: 10.1038/psp.2014.30,,
+nT_C,,cell,Number of Naive T Cells in the Blood,derived,"['rho_nT', 'V_C']",p(1)*p(2)
+nT_P,,cell,Number of Naive T Cells in the Peripheral Compartment,derived,"['rho_nT', 'V_C']",p(1)*p(2)*50
+nT_LN,,cell,Number of Naive T Cells in the Lymph Node Compartment,derived,"['rho_nT', 'V_C', 'V_P', 'V_LN']",p(1)*p(2)/p(3)*p(4)
+k_act,20.0,1/day,Rate of T Cell Activation,doi: 10.1038/psp.2014.30,,
+k_act_Treg,20.0,1/day,Rate of Treg Activation,doi: 10.1038/psp.2014.30,,
+k_nT_pro,320000000.0,cell/day,Rate of Naive T Cell Proliferation,doi: 10.1016/j.immuni.2012.02.006,,
+k_nT_pro_Treg,320000000.0,cell/day,Rate of Naive Treg Proliferation,doi: 10.1016/j.immuni.2012.02.006,,
+K_nT_pro,1000000000.0,cell,Naive T cell Density for Half-Maximal Peripheral Proliferation,doi: 10.1016/j.immuni.2012.02.006,,
+k_pro,1.0,1/day,Rate of T Cell Proliferation,doi: 10.1126/science.1260044,,
+k_pro_Treg,1.0,1/day,Rate of Treg Proliferation,doi: 10.1126/science.1260044,,
+k_nT_death,0.002,1/day,Rate of Naive T Cell Death,doi: 10.1016/j.immuni.2012.02.006,,
+k_death,2.0,1/day,Rate of T Cell Death,doi: 10.1038/psp.2014.30,,
+k_death_Treg,2.0,1/day,Rate of Treg Death,doi: 10.1038/psp.2014.30,,
+q_P_in,,1/day,Rate of T Cell Peripheral Entry,derived,"['k_mig', 'rho_adh', 'gamma_P', 'V_P']",p(1)*p(2)*p(3)*p(4)
+q_P_in_Treg,,1/day,Rate of Treg Peripheral Entry,derived,"['k_mig_Treg', 'rho_adh', 'gamma_P', 'V_P']",p(1)*p(2)*p(3)*p(4)
+q_P_out,1.0,1/day,Rate of T Cell Peripheral Exit,doi: 10.1038/psp.2014.30,,
+q_P_out_Treg,0.015,1/day,Rate of Treg Peripheral Exit,doi: 10.1038/psp.2014.30,,
+q_T_in,,1/day/centimeter^3,Rate of T Cell Tumour Entry,derived,"['k_mig', 'rho_adh', 'gamma_T']",p(1)*p(2)*p(3)
+q_T_in_Treg,,1/day/centimeter^3,Rate of Treg Tumour Entry,derived,"['k_mig_Treg', 'rho_adh', 'gamma_T']",p(1)*p(2)*p(3)
+nTreg_C,250000000.0,cell,Number of Natural Tregs in the Blood,doi: 10.3389/fimmu.2015.00171,,
+nTreg_P,,cell,Number of Treg in the Peripheral Compartment,derived,"['nTreg_C', 'q_P_in_Treg', 'q_P_out_Treg', 'k_death_Treg']",p(1)*p(2)/(p(3)+p(4))
+nTreg_LN,,cell,Number of Treg in the Lymph Node Compartment,derived,"['nTreg_P', 'V_P', 'V_LN']",p(1)/p(2)*p(3)
+k_C_Tcell,18.0,1/day,Cancer Cell Death Rate due to T Cells,estimated,,
+k_Tcell,0.1,1/day,Rate of T Cell Exhaustion from Cancer Cells,estimated,,
+k_Treg,0.1,1/day,Rate of T Cell Exhaustion from Tregs,estimated,,
+k_IL2_deg,0.2,1/minute,IL2 Degradation Rate,PMID: 3871099,,
+k_IL2_cons,6e-06,nanomole/cell/hour,IL2 Maximum Consumption Rate by T Cells,PMID: 3871099,,
+k_IL2_sec,3e-05,nanomole/cell/hour,IL2 Secretion Rate from Activated T Cells,doi: 10.1371/journal.pcbi.1004206    doi: 10.1073/pnas.1117194109,,
+IL2_50,0.32,nanomolarity,IL2 Concentration for Half-Maximal Consumption by Cytotoxic T Cells,doi: 10.1126/science.1260044,,
+IL2_50_Treg,0.0032,nanomolarity,IL2 Concentration for Half-Maximal Consumption by Tregs,doi: 10.1084/jem.166.4.1055,,
+N0,15.0,dimensionless,Baseline Number of Activated T Cell Generations,doi: 10.1126/science.1260044,,
+N_IL2,2.0,dimensionless,Additional Number of Activated T Cell Generations Due to IL2,doi: 10.1126/science.1260044,,
+k_APC_mat,1.5,1/day,Rate of APC Maturation,doi: 10.1038/psp.2014.30,,
+k_APC_mig,4.0,1/day,Rate of APC Migration,doi: 10.1016/j.celrep.2016.01.048,,
+k_APC_death,0.01,1/day,Rate of APC Death,doi: 10.1074/jbc.M112.448126,,
+k_mAPC_death,0.02,1/day,Rate of mAPC Death,doi: 10.1074/jbc.M112.448126,,
+APC0_T,400000.0,cell/milliliter,APC Density in Tumour,doi: 10.1016/j.cell.2017.04.014,,
+APC0_LN,1200000.0,cell/milliliter,APC Density in LN,doi: 10.1016/j.immuni.2004.08.007,,
+k_c,2.0,1/day,Cytokine Time Constant,doi: 10.1038/psp.2014.30,,
+c0,1e-09,molarity,Baseline Cytokine Concentration,doi: 10.1038/psp.2014.30,,
+c50,1e-09,molarity,Cytokine Concentration for Half-Maximal APC Maturation,doi: 10.1038/psp.2014.30,,
+DAMPs,1.34e-14,mole/cell,Concentration of Cytokines Released by Cancer Cell Death,doi: 10.1002/bies.201300066   doi: 10.1155/2016/7436849,,
+n_sites_APC,10.0,dimensionless,Maximum Number of T Cells an APC can Interact with,doi: 10.1038/psp.2014.30,,
+N_MHC,1.0,dimensionless,Number of MHC Molecule Types,user-defined,,
+MHC_T,,molecule/micrometer^2,Total Number of MHC Molecules per Unit Area,derived,"['n_MHC_T', 'A_endo', 'N_endo', 'A_s']",p(1)/(p(2)*p(3)+p(4))
+kin,14.4,1/day,Rate of MHC Internalization,doi: 10.1038/psp.2014.30,,
+kout,28.8,1/day,Rate of MHC Externalization,doi: 10.1038/psp.2014.30,,
+V_e,,micrometer^3,Endosomal Volume,derived,"['V_endo', 'N_endo']",p(1)*p(2)
+A_e,,micrometer^2,Endosomal Surface Area,derived,"['A_endo', 'N_endo']",p(1)*p(2)
+A_s,900.0,micrometer^2,APC Surface Area,doi: 10.1006/jtbi.1996.0190,,
+k_up,14.4,1/day/cell,Rate of Antigen Uptake,doi: 10.1038/psp.2014.30,,
+k_xP_deg,2.0,1/day,Rate of Antigen Degradation in the Extracellular Space,doi: 10.1074/jbc.M112.448126,,
+k_P_deg,17.28,1/day,Rate of Antigen Degradation in Endosomes,doi: 10.1038/psp.2014.30,,
+k_p_deg,144.0,1/day,Rate of Epitope Degradation,doi: 10.1038/psp.2014.30,,
+k_on,144000.0,1/day/molarity,Antigen Association Constant,doi: 10.1006/jtbi.1996.0190,,
+A_syn,37.8,micrometer^2,Synapse Surface Area,doi: 10.4049/jimmunol.175.3.1575,,
+A_cell,,micrometer^2,Cancer Cell Surface Area,derived,['D_cell'],4*pi*(p(1)/2)^2
+A_Tcell,,micrometer^2,T Cell Surface Area,derived,['D_Tcell'],4*pi*(p(1)/2)^2
+k_TCR_p,1.0,1/second,Rate of TCR Modification,doi: 10.1038/nri3728,,
+k_TCR_on,1.0,1/(second*molecule/micrometer^2),Rate of TCR Binding,doi: 10.1038/nri3728,,
+k_TCR_off,1.0,1/second,Rate of TCR Unbinding,doi: 10.1038/nri3728,,
+phi_TCR,0.09,1/second,Rate of TCR Modification Leading to Non-Signaling,doi: 10.1038/nri3728,,
+N_TCR,10.0,dimensionless,Number of Intermediate Steps,doi: 10.1038/nri3728,,
+TCR_tot,,molecule/micrometer^2,Number of TCR Molecules on Naive T Cells per Unit Area,derived,"['TCR_total', 'A_Tcell']",p(1)/p(2)
+p_50,,molecule/micrometer^2,MHC-Epitope-TCR Concentration for Half-Maximal T Cell Activation,derived,"['N_p_50', 'A_syn']",p(1)/p(2)
+T_PD1_total,60000.0,molecule,Total number of PD1 Molecules on T Cells,doi: 10.1074/jbc.M112.448126,,
+T_PDL1_total,1600000.0,molecule,Total number of PDL1 Molecules on T Cells,doi: 10.1074/jbc.M112.448126,,
+C_PDL1_total,1600000.0,molecule,Total number of PDL1 Molecules on Cancer Cells,doi: 10.1074/jbc.M112.448126,,
+C_PDL2_total,40000.0,molecule,Total number of PDL2 Molecules on Cancer Cells,doi: 10.1074/jbc.M112.448126,,
+APC_PDL1_total,1600000.0,molecule,Total number of PDL1 Molecules on APCs,doi: 10.1074/jbc.M112.448126,,
+APC_PDL2_total,40000.0,molecule,Total number of PDL2 Molecules on APCs,doi: 10.1074/jbc.M112.448126,,
+kon_PD1_PDL1,,1/(micromolarity*nanometer*second),PD1-PDL1 Binding Rate,derived,"['k_PD1_PDL1', 'd_syn']",p(1)/p(2)
+koff_PD1_PDL1,,1/second,PD1-PDL1 Unbinding Rate,derived,"['k_PD1_PDL1', 'kd_PD1_PDL1']",p(1)*p(2)
+kon_PD1_PDL2,,1/(micromolarity*nanometer*second),PD1-PDL2 Binding Rate,derived,"['k_PD1_PDL2', 'd_syn']",p(1)/p(2)
+koff_PD1_PDL2,,1/second,PD1-PDL2 Unbinding Rate,derived,"['k_PD1_PDL2', 'kd_PD1_PDL2']",p(1)*p(2)
+kon_PD1_aPD1,1300000.0,1/(molarity*second),PD1-nivolumab Binding Rate Constant,doi: 10.1158/2326-6066.CIR-14-0040,,
+koff_PD1_aPD1,,1/second,PD1-aPD1 Unbinding Rate,derived,"['kon_PD1_aPD1', 'kd_PD1_aPD1']",p(1)*p(2)
+kon_PDL1_aPDL1,430000.0,1/(molarity*second),PDL1-durvalumab Binding Rate Constant,doi: 10.1158/2326-6066.CIR-14-0040,,
+koff_PDL1_aPDL1,,1/second,PDL1-aPDL1 Unbinding Rate,derived,"['kon_PDL1_aPDL1', 'kd_PDL1_aPDL1']",p(1)*p(2)
+Chi_PD1,,1/nanometer,PD1 Antibody Cross-Arm Binding Strength Corrected for 2D,derived,"['chi_PD1', 'd_syn']",p(1)/p(2)
+Chi_PDL1,,1/nanometer,PDL1 Antibody Cross-Arm Binding Strength Corrected for 2D,derived,"['chi_PDL1', 'd_syn']",p(1)/p(2)
+PD1_50,20.0,molecule/micrometer^2,PD1-PDL1 Concentration for Half-Maximal PD1-Induced Reduction of T Cell Killing,estimated,,
+n_PD1,2.0,dimensionless,Hill Coefficient for PD1-Induced Reduction of T Cell Killing,estimated,,
+cell,1.0,cell,Cell counter,,,
+nLNs,21.0,dimensionless,Number of tumour draining lymph nodes,"Tumor site specific - for lung, doi: 10.1590/s1806-37132007000200006",,
+D_LN,5.0,millimeter,Diameter of a single lymph node,doi: 10.1590/s1806-37132007000200006,,
+D_cell,16.9,micrometer,Cancer cell diameter,doi: 10.1371/journal.pone.0067466,,
+D_T_max,20.0,centimeter,Maximum Tumour Diameter,doi: 10.1371/journal.pone.0093430,,
+rho_cell,1000000000.0,cell/milliliter,Cancer cell density,doi: 10.4161/cc.8.3.7608,,
+D_Tcell,6.94,micrometer,Average T Cell Diameter,doi: 10.1136/jcp.34.10.1083,,
+k_mig,1e-12,1/minute/cell,Rate of T Cell Migration,doi: 10.1038/psp.2014.30,,
+k_mig_Treg,1e-12,1/minute/cell,Rate of Treg Migration,doi: 10.1038/psp.2014.30,,
+rho_adh,100000000.0,cell/centimeter^3,T Cell Adhesion Density,doi: 10.1038/psp.2014.30,,
+rho_nT,505000.0,cell/milliliter,Naive T Cell Density,doi: 10.1016/j.jim.2010.06.017,,
+rho_nTreg,860000.0,cell/milliliter,Naive Treg Density,doi: 10.1016/j.jim.2010.06.017,,
+n_MHC_T,2000000.0,molecule,Total Number of MHC Molecules,doi: 10.1038/psp.2014.30,,
+N_endo,10.0,dimensionless,Number of Endosomal Vesicles,doi: 10.1006/jtbi.1996.0190,,
+V_endo,4e-17,liter,Volume of Single Endosome,doi: 10.1006/jtbi.1996.0190,,
+A_endo,1.5,micrometer^2,Surface Area of Single Endosome,doi: 10.1006/jtbi.1996.0190,,
+TCR_total,15708.0,molecule,Number of TCR Molecules on Naive T Cells,doi: 10.1038/nri3728,,
+N_p_50,0.001,molecule,Number of Epitope Molecules for Half-Maximal T Cell Activation,doi: 10.1002/eji.1830271230,,
+d_syn,3.0,nanometer,Gap Distance of Immune Synapse,doi: 10.4049/jimmunol.175.3.1575,,
+kd_PD1_PDL1,8.2,micromolarity,PD1-PDL1 Dissociation Constant,doi: 10.1074/jbc.M112.448126,,
+k_PD1_PDL1,0.175,1/(micromolarity*second),PD1-PDL1 Binding Rate Constant,doi: 10.1074/jbc.M112.448126,,
+kd_PD1_PDL2,2.3,micromolarity,PD1-PDL2 Dissociation Constant,doi: 10.1074/jbc.M112.448126,,
+k_PD1_PDL2,0.23,1/(micromolarity*second),PD1-PDL2 Binding Rate Constant,doi: 10.1074/jbc.M112.448126,,
+kd_PD1_aPD1,2.6,nanomolarity,PD1-nivolumab Dissociation Constant,doi: 10.1158/2326-6066.CIR-14-0040,,
+kd_PDL1_aPDL1,66.5,nanomolarity,PDL1-durvalumab Dissociation Constant,doi: 10.1158/2326-6066.CIR-14-0040,,
+chi_PD1,10.0,dimensionless,PD1 Antibody Cross-Arm Binding Strength,doi: 10.1158/2326-6066.CIR-14-0040,,
+chi_PDL1,100.0,dimensionless,PDL1 Antibody Cross-Arm Binding Strength,estimated,,

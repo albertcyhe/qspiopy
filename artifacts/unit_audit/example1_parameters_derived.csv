@@ -1,0 +1,29 @@
+name,value,units,description,source,derived_from,expression
+V_LN,,liter,Lymph Node compartment volume,derived,"['nLNs', 'D_LN']",p(1)*4/3*pi*(p(2)/2)^3
+vol_cell,,micrometer^3/cell,Volume of a single cancer cell,derived,"['D_cell', 'cell']",4/3*pi*(p(1)/2)^3/p(2)
+C_max,,cell,Cancer cell capacity,derived,"['D_T_max', 'rho_cell']",4*pi/3*(p(1)/2)^3*p(2)
+Q_nT_thym_Treg,,cell,Rate of Naive Treg Output from the Thymus,derived,"['nTreg_C', 'k_death_Treg']",p(1)*p(2)
+nT_C,,cell,Number of Naive T Cells in the Blood,derived,"['rho_nT', 'V_C']",p(1)*p(2)
+nT_P,,cell,Number of Naive T Cells in the Peripheral Compartment,derived,"['rho_nT', 'V_C']",p(1)*p(2)*50
+nT_LN,,cell,Number of Naive T Cells in the Lymph Node Compartment,derived,"['rho_nT', 'V_C', 'V_P', 'V_LN']",p(1)*p(2)/p(3)*p(4)
+q_P_in,,1/day,Rate of T Cell Peripheral Entry,derived,"['k_mig', 'rho_adh', 'gamma_P', 'V_P']",p(1)*p(2)*p(3)*p(4)
+q_P_in_Treg,,1/day,Rate of Treg Peripheral Entry,derived,"['k_mig_Treg', 'rho_adh', 'gamma_P', 'V_P']",p(1)*p(2)*p(3)*p(4)
+q_T_in,,1/day/centimeter^3,Rate of T Cell Tumour Entry,derived,"['k_mig', 'rho_adh', 'gamma_T']",p(1)*p(2)*p(3)
+q_T_in_Treg,,1/day/centimeter^3,Rate of Treg Tumour Entry,derived,"['k_mig_Treg', 'rho_adh', 'gamma_T']",p(1)*p(2)*p(3)
+nTreg_P,,cell,Number of Treg in the Peripheral Compartment,derived,"['nTreg_C', 'q_P_in_Treg', 'q_P_out_Treg', 'k_death_Treg']",p(1)*p(2)/(p(3)+p(4))
+nTreg_LN,,cell,Number of Treg in the Lymph Node Compartment,derived,"['nTreg_P', 'V_P', 'V_LN']",p(1)/p(2)*p(3)
+MHC_T,,molecule/micrometer^2,Total Number of MHC Molecules per Unit Area,derived,"['n_MHC_T', 'A_endo', 'N_endo', 'A_s']",p(1)/(p(2)*p(3)+p(4))
+V_e,,micrometer^3,Endosomal Volume,derived,"['V_endo', 'N_endo']",p(1)*p(2)
+A_e,,micrometer^2,Endosomal Surface Area,derived,"['A_endo', 'N_endo']",p(1)*p(2)
+A_cell,,micrometer^2,Cancer Cell Surface Area,derived,['D_cell'],4*pi*(p(1)/2)^2
+A_Tcell,,micrometer^2,T Cell Surface Area,derived,['D_Tcell'],4*pi*(p(1)/2)^2
+TCR_tot,,molecule/micrometer^2,Number of TCR Molecules on Naive T Cells per Unit Area,derived,"['TCR_total', 'A_Tcell']",p(1)/p(2)
+p_50,,molecule/micrometer^2,MHC-Epitope-TCR Concentration for Half-Maximal T Cell Activation,derived,"['N_p_50', 'A_syn']",p(1)/p(2)
+kon_PD1_PDL1,,1/(micromolarity*nanometer*second),PD1-PDL1 Binding Rate,derived,"['k_PD1_PDL1', 'd_syn']",p(1)/p(2)
+koff_PD1_PDL1,,1/second,PD1-PDL1 Unbinding Rate,derived,"['k_PD1_PDL1', 'kd_PD1_PDL1']",p(1)*p(2)
+kon_PD1_PDL2,,1/(micromolarity*nanometer*second),PD1-PDL2 Binding Rate,derived,"['k_PD1_PDL2', 'd_syn']",p(1)/p(2)
+koff_PD1_PDL2,,1/second,PD1-PDL2 Unbinding Rate,derived,"['k_PD1_PDL2', 'kd_PD1_PDL2']",p(1)*p(2)
+koff_PD1_aPD1,,1/second,PD1-aPD1 Unbinding Rate,derived,"['kon_PD1_aPD1', 'kd_PD1_aPD1']",p(1)*p(2)
+koff_PDL1_aPDL1,,1/second,PDL1-aPDL1 Unbinding Rate,derived,"['kon_PDL1_aPDL1', 'kd_PDL1_aPDL1']",p(1)*p(2)
+Chi_PD1,,1/nanometer,PD1 Antibody Cross-Arm Binding Strength Corrected for 2D,derived,"['chi_PD1', 'd_syn']",p(1)/p(2)
+Chi_PDL1,,1/nanometer,PDL1 Antibody Cross-Arm Binding Strength Corrected for 2D,derived,"['chi_PDL1', 'd_syn']",p(1)/p(2)

@@ -7,7 +7,7 @@
 | 里程碑 | 目标 | 当前状态 |
 | --- | --- | --- |
 | **M1 事件语义** | 状态触发 + 同刻顺序 + pre/post 双记录 + ε‑bump + first_step + 事件后 reconcile | ✅ 已实现：schedule 清洁、聚合同刻剂量、延迟事件队列、trigger specs、metadata (`phase_code` 等) |
-| **M2 单位与参数** | `units.py` 统一换算（时间/体积/浓度/速率/剂量），参数派生 | ⚠️ 进行中：volume/conc/rate + mg→mol(MW) 转换已接入（registry/剂量审计、fallback、apply_dose 都用 `convert_amount`），参数 JSON 现已支持 derived DAG；待完成：CL/Q/kon/koff 族的剩余单位映射及与 MATLAB 参数表的逐项核对 |
+| **M2 单位与参数** | `units.py` 统一换算（时间/体积/浓度/速率/剂量），参数派生 | ⚠️ 进行中：volume/conc/rate + mg→mol(MW) 转换已接入（registry/剂量审计、fallback、apply_dose 都用 `convert_amount`），参数 JSON 支持 derived DAG；**待完成**：CL/Q/kon/koff 族的剩余单位映射、参数 Graph 产物写入 provenance、`doses.csv` 同步 MW/units 字段 |
 | **M3 初始化与模块化** | 目标体积初始条件、模块化加载 | ⏳ 未开始 |
 | **M4 多克隆与动态体积** | 体积/伪进展输出 & 克隆竞争 | ⏳ 未开始 |
 | **M5 验收/CI** | 组件测试 + 数值门绿灯 + CI | ⏳ 进行中（validate_surrogate 现已稳定，但 A1 数值门仍未过） |
@@ -402,3 +402,7 @@ def apply_dose(self, dose: DoseEntry, amount: float, context: Dict[str, float], 
   * 剂量审计 `delta_state_value`/`delta_amount_mol` 符合维度。
 
 ---
+- **风险清单（M2）**：
+  1. 2D kon 严格模式需要明确的膜厚/绑定长度（默认仍用 legacy 常数 9.8412890625）。
+  2. 剂量若缺药物 MW（mg/µg 输入）会抛错；必须在 parameters/config 中显式提供 `MW_<drug>`。
+  3. 派生参数 DAG 若存在循环/缺项，加载将失败；需依 audit 脚本 (`scripts/audit_units.py`) 每次检查。
