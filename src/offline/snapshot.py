@@ -360,17 +360,9 @@ class FrozenModel:
         except ValueError as exc:
             raise SnapshotError(f"Failed to normalise dose '{dose.name}' targeting {target}: {exc}") from exc
 
-        def _label(value: Optional[str], fallback: str) -> str:
-            if value is None:
-                return fallback
-            if isinstance(value, float) and math.isnan(value):
-                return fallback
-            text = str(value).strip()
-            return text or fallback
-
         is_concentration = delta != amount_mol
-        dimension_label = _label(entry.interpreted_dimension, "molarity" if is_concentration else "amount")
-        units_label = _label(entry.units, "molarity" if is_concentration else "mole")
+        dimension_label = "molarity" if is_concentration else "amount"
+        units_label = "molarity" if is_concentration else "mole"
         current_value = context.get(entry.identifier, 0.0)
         new_value = current_value + delta
         self._apply_target_value(entry.identifier, new_value, context, state)

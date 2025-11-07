@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from scipy.integrate import solve_ivp
 
+from .aliases import inject_output_aliases
 from .entities import BASE_HEADER, DoseEntry, EventEntry, ScenarioResult, ScheduledDose, SEMANTICS_VERSION
 from .errors import AlignmentFail, ConfigError, NumericsError, SnapshotError
 from .initial_conditions import ICOptions, generate_initial_conditions
@@ -240,36 +241,8 @@ def _record_solution_samples(
         model.evaluate_repeated_assignments(ctx)
         model.apply_algebraic_rules(ctx, vec, mutate=False)
         model.sync_state_from_context(ctx, vec)
-        _inject_output_aliases(ctx)
+        inject_output_aliases(ctx)
         samples[key] = vec
-
-
-def _inject_output_aliases(context: Dict[str, float]) -> None:
-    """Populate canonical keys expected by downstream outputs."""
-
-    if "H_PD1_C1" not in context:
-        for candidate in ("H_PD1", "PD1_OCCUPANCY", "pd1_occupancy", "H_PD1_TOTAL"):
-            if candidate in context:
-                context["H_PD1_C1"] = context[candidate]
-                break
-
-    if "V_T.T1" not in context:
-        for candidate in ("T", "T_total", "T_tumour", "CD8_T_cells"):
-            if candidate in context:
-                context["V_T.T1"] = context[candidate]
-                break
-
-    if "C_x" not in context:
-        for candidate in ("C_dead", "Cdead", "C_D", "dead_cells"):
-            if candidate in context:
-                context["C_x"] = context[candidate]
-                break
-
-    if "V_T" not in context:
-        for candidate in ("tumor_volume_l", "tumour_volume_l", "Vtumour"):
-            if candidate in context:
-                context["V_T"] = context[candidate]
-                break
 
 
 def _perform_t0_quick_check(model: FrozenModel, state: np.ndarray, context: Dict[str, float]) -> None:
@@ -473,7 +446,7 @@ def simulate_frozen_model(
     if ic_mode == "target_volume":
         ic_opts = ic_options or ICOptions(target_diameter_cm=2.0)
         state, context = generate_initial_conditions(model, opts=ic_opts)
-        _inject_output_aliases(context)
+        inject_output_aliases(context)
     else:
         state = model.initial_state().astype(float)
         model.apply_initial_assignments_to_state(state)
@@ -491,7 +464,7 @@ def simulate_frozen_model(
         model.evaluate_repeated_assignments(ctx)
         model.apply_algebraic_rules(ctx, vec, mutate=False)
         model.sync_state_from_context(ctx, vec)
-        _inject_output_aliases(ctx)
+        inject_output_aliases(ctx)
         return ctx
 
     context = context or reconcile(state)
@@ -668,7 +641,7 @@ def simulate_frozen_model(
         model.evaluate_repeated_assignments(ctx)
         model.apply_algebraic_rules(ctx, vec, mutate=False)
         model.sync_state_from_context(ctx, vec)
-        _inject_output_aliases(ctx)
+        inject_output_aliases(ctx)
         contexts.append(dict(ctx))
 
         c_cells = ctx.get("C1", 0.0)

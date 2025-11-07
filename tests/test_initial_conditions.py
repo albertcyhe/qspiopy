@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from src.offline.initial_conditions import ICOptions, _diameter_cm_from_volume_l, generate_initial_conditions
 from src.offline.segment_integrator import SolverConfig
@@ -48,6 +49,7 @@ class DummyModel:
         return np.array([self.growth_rate * y[0]], dtype=float)
 
 
+@pytest.mark.slow
 def test_generate_initial_conditions_hits_target():
     model = DummyModel(growth_rate=0.05, cell_volume_l=1e-12)
     opts = ICOptions(

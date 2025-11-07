@@ -10,13 +10,14 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
 from scripts.compare_audits import compare_doses, compare_events
 from scripts.scenario_registry import a_series, doses_to_entries, microdose
+from src.offline.initial_conditions import ICOptions
 from src.offline.frozen_model import EVENT_LOG_FIELDS, load_frozen_model, simulate_frozen_model
 
 
@@ -84,6 +85,19 @@ SCENARIO_REGISTRY[MICRO_SPEC.name] = Scenario(
     custom_doses=MICRO_DOSES,
     context_outputs=dict(MICRO_SPEC.context_outputs),
 )
+
+
+def _parse_param_overrides(pairs: Iterable[str]) -> Dict[str, float]:
+    overrides: Dict[str, float] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise SystemExit(f"Invalid --param-override '{pair}'; expected name=value")
+        name, value = pair.split("=", 1)
+        try:
+            overrides[name.strip()] = float(value)
+        except ValueError as exc:  # pragma: no cover - CLI validation
+            raise SystemExit(f"Invalid numeric value in --param-override '{pair}': {exc}") from exc
+    return overrides
 
 
 def _collect_pk_invariants(model) -> Dict[str, float]:
@@ -181,6 +195,10 @@ def _run_scenario(
     seed: Optional[int],
     collect_events: bool,
     dump_t0: bool,
+    ic_mode: str,
+    ic_options: ICOptions,
+    module_blocks: Sequence[str],
+    param_overrides: Dict[str, float],
 ) -> Tuple[Dict[str, Path], pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -219,6 +237,13 @@ def _run_scenario(
         simulate_kwargs["event_log"] = candidate_events
     elif emit_diagnostics:
         simulate_kwargs["event_log"] = candidate_events
+    simulate_kwargs["ic_mode"] = ic_mode
+    if ic_mode == "target_volume":
+        simulate_kwargs["ic_options"] = ic_options
+    if module_blocks:
+        simulate_kwargs["module_blocks"] = list(module_blocks)
+    if param_overrides:
+        simulate_kwargs["param_overrides"] = dict(param_overrides)
     result = simulate_frozen_model(
         scenario.snapshot,
         days=scenario.stop_time,
@@ -461,6 +486,32 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--emit-diagnostics", action="store_true", help="Emit solver/banner diagnostics and error tables")
     parser.add_argument("--numeric-gates", action="store_true", help="Enforce rel_L2/maxRE/event timing thresholds")
     parser.add_argument("--dump-t0", action="store_true", help="Copy equations_eval_t0.csv into the output directory")
+    parser.add_argument("--ic-mode", choices=["snapshot", "target_volume"], default="snapshot")
+    parser.add_argument("--ic-target-diam-cm", type=float, default=2.0)
+    parser.add_argument(
+        "--ic-reset-policy",
+        choices=["all_zero", "cancer_only", "custom"],
+        default="cancer_only",
+        help="State reset policy for target_volume ICs",
+    )
+    parser.add_argument(
+        "--ic-preserve-pattern",
+        action="append",
+        default=[],
+        help="fnmatch pattern(s) of state identifiers to preserve when reset_policy=custom",
+    )
+    parser.add_argument(
+        "--module-block",
+        action="append",
+        default=[],
+        help="Repeated-assignment targets to disable before simulation",
+    )
+    parser.add_argument(
+        "--param-override",
+        action="append",
+        default=[],
+        help="Parameter override in the form name=value (may be repeated)",
+    )
     scenario_choices = sorted(SCENARIO_REGISTRY.keys())
     parser.add_argument(
         "--scenarios",
@@ -483,6 +534,19 @@ def main(argv: Iterable[str] | None = None) -> int:
         scenario_names = scenario_choices
     scenarios = [SCENARIO_REGISTRY[name] for name in scenario_names]
 
+    preserve_patterns = tuple(
+        pattern.strip().lower()
+        for pattern in (args.ic_preserve_pattern or [])
+        if pattern and pattern.strip()
+    )
+    ic_options = ICOptions(
+        target_diameter_cm=args.ic_target_diam_cm,
+        reset_policy=args.ic_reset_policy,
+        preserve_patterns=preserve_patterns,
+    )
+    param_overrides = _parse_param_overrides(args.param_override or [])
+    module_blocks = [block.strip() for block in (args.module_block or []) if block and block.strip()]
+
     results: List[Dict[str, Path]] = []
     metrics_records: List[Dict[str, object]] = []
     worst_alignment: Optional[Dict[str, object]] = None
@@ -499,6 +563,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             seed=args.seed,
             collect_events=args.numeric_gates,
             dump_t0=args.dump_t0,
+            ic_mode=args.ic_mode,
+            ic_options=ic_options,
+            module_blocks=module_blocks,
+            param_overrides=param_overrides,
         )
         results.append({"scenario": scenario.name, **paths})
         run_data.append((scenario.name, surrogate_frame, reference_frame, events_df, grid_meta, pk_meta))

@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | **M1 事件语义** | 状态触发 + 同刻顺序 + pre/post 双记录 + ε‑bump + first_step + 事件后 reconcile | ✅ 已实现：schedule 清洁、聚合同刻剂量、延迟事件队列、trigger specs、metadata (`phase_code` 等) |
 | **M2 单位与参数** | `units.py` 统一换算（时间/体积/浓度/速率/剂量），参数派生 | ✅ 已完成：所有时间/体积/流量/kon/koff 路径统一到 day/L/M；`normalise_dose_to_species()` 驱动 `apply_dose()`；ParameterGraph 派生值写入 `unit_normalisation_map` 并可由 `scripts/print_units_table.py` 审计；新增 `tests/test_units.py`、`tests/test_param_graph.py`。**遗留风险**：2D kon 仍依赖 legacy 常数（待几何参数化）；快照若缺药物 MW 则会在 mg 剂量路径上硬 fail；A1 数值门虽然跑通流程但 tumour/occupancy/tcell_density 仍 ❌（语义问题挪至 M3/M4 解决）。 |
-| **M3 初始化与模块化** | 目标体积初始条件、模块化加载 | 🟡 进行中：新建 `initial_conditions.py`（单细胞播种→事件检测，命令入口 `ic_mode=\"target_volume\"`）；`modules.switches.apply_parameter_overrides/disable_repeated_assignments` 提供参数覆盖与最小模块开关；`simulate_frozen_model` 注入输出别名（PD‑1、T cell density）并支持 IC/模块新参数。剩余工作：与 MATLAB 参考对齐（确认目标直径、需零化的 tumour 变量名单）以及在 CLI 中暴露模块预设。 |
+| **M3 初始化与模块化** | 目标体积初始条件、模块化加载 | 🟡 进行中：`initial_conditions.py` + CLI (`--ic-mode target_volume`, `--ic-target-diam-cm`, `--ic-reset-policy`、`--module-block`, `--param-override`) 已合入；`simulate_frozen_model` 支持参数覆盖、模块阻断与 alias 注入；`tests/test_alias_injection.py`（快）与 `tests/test_initial_conditions.py -m slow` 覆盖新功能。**残留**：example1 从单细胞仅能长到 0.012 cm@4000 d，尚无法使用 `ic_mode=target_volume` 跑 A1 门，需调节 reset/preserve 策略或肿瘤生长模块后再启用。 |
 | **M4 多克隆与动态体积** | 体积/伪进展输出 & 克隆竞争 | ⏳ 未开始 |
 | **M5 验收/CI** | 组件测试 + 数值门绿灯 + CI | ⏳ 进行中（validate_surrogate 现已稳定，但 A1 数值门仍未过） |
 
@@ -18,7 +18,7 @@
 **最新实测（2025-11-07）**
 
 - MATLAB 参考已用 `/Volumes/AlbertSSD/Applications/MATLAB_R2023b.app/bin/matlab` 重新生成（`python -m scripts.run_alignment_suite --scenarios A1 --output artifacts/validation`）。
-- `python -m scripts.validate_surrogate --scenarios A1 --dump-t0 --numeric-gates`：依赖的新单位链路全部生效，但 tumour_volume_l rel_L2≈1.4e-1、pd1_occupancy rel_L2=1.0、tcell_density rel_L2≈0.79，确认下一阶段需聚焦 tumour/occupancy 模块与 repeated assignments。
+- `python -m scripts.validate_surrogate --scenarios A1 --dump-t0 --numeric-gates`（当前仍用 `ic_mode=snapshot`，因为 target-volume IC 尚未达标）：tumour_volume_l rel_L2≈1.4e-1、pd1_occupancy rel_L2=1.0、tcell_density rel_L2≈0.79。下一步将在调通 target-volume IC 后，改用 `python -m scripts.validate_surrogate --scenarios A1 --ic-mode target_volume --ic-target-diam-cm <calibrated> --dump-t0 --numeric-gates ...` 重新评估。
 
 ---
 

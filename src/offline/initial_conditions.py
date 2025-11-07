@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import math
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
@@ -9,6 +10,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 from scipy.integrate import solve_ivp
 
+from .aliases import inject_output_aliases
 from .segment_integrator import SolverConfig
 from .snapshot import FrozenModel
 
@@ -51,6 +53,8 @@ class ICOptions:
     seed_species_id: str = "C1"
     seed_cells: float = 1.0
     max_days: float = 4000.0
+    reset_policy: str = "cancer_only"  # {"all_zero","cancer_only","custom"}
+    preserve_patterns: Tuple[str, ...] = ()
     solver: SolverConfig = field(
         default_factory=lambda: SolverConfig(method="BDF", rtol=1e-6, atol=1e-9, max_step=np.inf, seed=None)
     )
@@ -62,7 +66,25 @@ def generate_initial_conditions(model: FrozenModel, *, opts: ICOptions) -> Tuple
     seed_identifier = _resolve_species_identifier(model, opts.seed_species_id)
     state0 = model.initial_state().astype(float)
     model.apply_initial_assignments_to_state(state0)
-    state0[:] = 0.0
+
+    def _should_preserve(identifier: str, species_name: Optional[str]) -> bool:
+        policy = (opts.reset_policy or "").lower()
+        token = (species_name or identifier or "").lower()
+        if policy == "all_zero":
+            return False
+        if policy == "cancer_only":
+            return not token.startswith("c")
+        if policy == "custom":
+            patterns = opts.preserve_patterns or ()
+            return any(fnmatch.fnmatch(token, pattern.lower()) for pattern in patterns)
+        return False
+
+    for ident, idx in model.dynamic_indices.items():
+        entry = model.species_lookup.get(ident)
+        if _should_preserve(ident, entry.name if entry else None):
+            continue
+        state0[idx] = 0.0
+
     seed_idx = model.dynamic_indices[seed_identifier]
     state0[seed_idx] = float(opts.seed_cells)
 
@@ -98,4 +120,5 @@ def generate_initial_conditions(model: FrozenModel, *, opts: ICOptions) -> Tuple
 
     y_star = np.asarray(sol.y_events[0][-1], dtype=float)
     ctx_star = _reconcile_context(model, y_star.copy())
+    inject_output_aliases(ctx_star)
     return y_star, ctx_star

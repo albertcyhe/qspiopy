@@ -18,11 +18,15 @@
   - Runner: `python -m scripts.validate_surrogate --scenarios A1 --dump-t0 --numeric-gates`  
   - Artefacts: `artifacts/validation/A1_*.csv` plus t₀ diagnostic tables inside the same directory.  
   - Result: ❌ fail — tumour_volume_l rel_L2 ≈ 1.42e‑1 / maxRE ≈ 1.92e‑1; pd1_occupancy rel_L2 = 1.0 / maxRE = 1.0; tcell_density_per_ul rel_L2 ≈ 7.86e‑1 / maxRE ≈ 7.99e‑1. Indicates the remaining deltas are now concentrated in tumour/occupancy biology rather than raw unit handling.
+- **Runtime plumbing upgrade (M3 partial)**  
+  - Changes: `simulate_frozen_model` now supports `ic_mode="target_volume"`, parameter overrides, repeated-assignment blocks, and alias injection; `scripts/validate_surrogate` exposes the new CLI flags (`--ic-mode`, `--ic-target-diam-cm`, `--ic-reset-policy`, `--param-override`, `--module-block`).  
+  - Tests: `pytest tests/test_alias_injection.py` (fast) and `pytest tests/test_initial_conditions.py -m slow` (explicit).  
+  - Status: ✅ features merged; target-volume IC currently fails to reach 2 cm for the example1 snapshot (max diameter ≈0.012 cm within 4000 days), so the A1 gate is still executed in `ic_mode="snapshot"` until the tumour-growth semantics are tuned.
 
 ## In Progress
 
 - **A1 semantic debugging** — reconcile tumour volume / PD‑1 occupancy / T-cell density between MATLAB replay and Python surrogate (targets: rel_L2 ≤ 1e‑3, maxRE ≤ 5e‑3). Focus now shifts to biology semantics (tumour module, receptor occupancy rules, repeated assignments) since unit conversions and dose audits match.
-- **Scenario orchestration** — registry + CLI plumbing complete; will unlock A2–A6/B* runs once the A1 gate is green and monotonicity checks can be enabled.
+- **Scenario orchestration** — registry + CLI plumbing complete; M3 switches are available via CLI, but the target-volume IC still needs a calibrated tumour-growth preset (currently stuck at ~0.012 cm). Once this is tuned, re-run `python -m scripts.validate_surrogate --scenarios A1 --ic-mode target_volume ...` to measure the improvement before unlocking the full A-series.
 
 ## Planned Runs
 
