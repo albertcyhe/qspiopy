@@ -45,6 +45,7 @@ class ParameterGraph:
             "type": "base",
             "unit": unit,
             "raw_value": value,
+            "canonical_value": canonical,
         }
 
     def add_spec(
@@ -85,6 +86,7 @@ class ParameterGraph:
                     "type": "derived",
                     "unit": spec.unit,
                     "raw_value": raw_value,
+                    "canonical_value": canonical,
                     "expression": spec.expression,
                     "dependencies": list(spec.dependencies),
                 }

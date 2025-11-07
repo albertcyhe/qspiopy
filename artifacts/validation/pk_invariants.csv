@@ -1,0 +1,2 @@
+scenario,kel_nivolumab,k12_nivolumab_T,k21_nivolumab_T,k12_nivolumab_LN,k21_nivolumab_LN,k12_nivolumab_P,k21_nivolumab_P,kel_param,kel_estimate_surrogate,kel_estimate_reference
+A1,0.0124092864,0.1472256,51.08238772575944,0.0030007584,10.916240740217793,0.0030007584,0.0002500632,0.062046432000000006,7.473999668590767e-17,0.06417950108879085

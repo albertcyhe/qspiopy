@@ -7,13 +7,18 @@
 | 里程碑 | 目标 | 当前状态 |
 | --- | --- | --- |
 | **M1 事件语义** | 状态触发 + 同刻顺序 + pre/post 双记录 + ε‑bump + first_step + 事件后 reconcile | ✅ 已实现：schedule 清洁、聚合同刻剂量、延迟事件队列、trigger specs、metadata (`phase_code` 等) |
-| **M2 单位与参数** | `units.py` 统一换算（时间/体积/浓度/速率/剂量），参数派生 | ⚠️ 进行中：volume/conc/rate + mg→mol(MW) 转换已接入（registry/剂量审计、fallback、apply_dose 都用 `convert_amount`），参数 JSON 支持 derived DAG；**待完成**：CL/Q/kon/koff 族的剩余单位映射、参数 Graph 产物写入 provenance、`doses.csv` 同步 MW/units 字段 |
+| **M2 单位与参数** | `units.py` 统一换算（时间/体积/浓度/速率/剂量），参数派生 | ✅ 已完成：所有时间/体积/流量/kon/koff 路径统一到 day/L/M；`normalise_dose_to_species()` 驱动 `apply_dose()`；ParameterGraph 派生值写入 `unit_normalisation_map` 并可由 `scripts/print_units_table.py` 审计；新增 `tests/test_units.py`、`tests/test_param_graph.py`。**遗留风险**：2D kon 仍依赖 legacy 常数（待几何参数化）；快照若缺药物 MW 则会在 mg 剂量路径上硬 fail；A1 数值门虽然跑通流程但 tumour/occupancy/tcell_density 仍 ❌（语义问题挪至 M3/M4 解决）。 |
 | **M3 初始化与模块化** | 目标体积初始条件、模块化加载 | ⏳ 未开始 |
 | **M4 多克隆与动态体积** | 体积/伪进展输出 & 克隆竞争 | ⏳ 未开始 |
 | **M5 验收/CI** | 组件测试 + 数值门绿灯 + CI | ⏳ 进行中（validate_surrogate 现已稳定，但 A1 数值门仍未过） |
 
 - [x] `validate_surrogate` 默认关闭性能基准（`--benchmark-replicates=0`）。
-- [ ] 数值门：A1 仍超标（tumour_volume/pd1_occupancy/tcell_density；PK 尾部），待完成 M2/M4 后重跑 `--numeric-gates`。
+- [ ] 数值门：A1 仍超标（tumour_volume/pd1_occupancy/tcell_density；PK 尾部），待完成 M3/M4 语义梳理后重跑 `--numeric-gates`。
+
+**最新实测（2025-11-07）**
+
+- MATLAB 参考已用 `/Volumes/AlbertSSD/Applications/MATLAB_R2023b.app/bin/matlab` 重新生成（`python -m scripts.run_alignment_suite --scenarios A1 --output artifacts/validation`）。
+- `python -m scripts.validate_surrogate --scenarios A1 --dump-t0 --numeric-gates`：依赖的新单位链路全部生效，但 tumour_volume_l rel_L2≈1.4e-1、pd1_occupancy rel_L2=1.0、tcell_density rel_L2≈0.79，确认下一阶段需聚焦 tumour/occupancy 模块与 repeated assignments。
 
 ---
 

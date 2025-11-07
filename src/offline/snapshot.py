@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
@@ -25,7 +26,7 @@ from .entities import (
 )
 from .errors import SnapshotError
 from .param_graph import ParameterGraph
-from .units import convert_amount, convert_parameter_value, convert_volume
+from .units import convert_amount, convert_parameter_value, convert_volume, normalise_dose_to_species
 
 
 class FrozenModel:
@@ -326,14 +327,14 @@ class FrozenModel:
         target = dose.target
         amount_units = dose.amount_units or "mole"
         mw = getattr(dose, "molecular_weight_g_per_mol", None)
-        try:
-            amount_mol = convert_amount(amount, amount_units, mw)
-        except ValueError:
-            amount_mol = amount
         entry = self.species_lookup.get(target)
         if entry is None and target in self.species_name_lookup:
             entry = self.species_name_lookup[target]
         if entry is None:
+            try:
+                amount_mol = convert_amount(amount, amount_units, mw)
+            except ValueError:
+                amount_mol = amount
             new_value = context.get(target, 0.0) + amount_mol
             self._apply_target_value(target, new_value, context, state)
             return {
@@ -345,31 +346,20 @@ class FrozenModel:
                 "delta_state_value": amount_mol,
                 "delta_amount_mol": amount_mol,
             }
-        delta = amount_mol
-        units_lower = (entry.units or "").lower()
-        dimension_lower = (entry.interpreted_dimension or "").lower()
+        compartment_name = entry.compartment
+        compartment_volume = context.get(compartment_name, self.compartments.get(compartment_name))
+        try:
+            delta, amount_mol = normalise_dose_to_species(
+                amount,
+                amount_units,
+                species_units=entry.units,
+                species_dimension=entry.interpreted_dimension,
+                compartment_volume_l=compartment_volume,
+                molecular_weight_g_per_mol=mw,
+            )
+        except ValueError as exc:
+            raise SnapshotError(f"Failed to normalise dose '{dose.name}' targeting {target}: {exc}") from exc
 
-        def _looks_like_concentration() -> bool:
-            if dimension_lower:
-                if any(token in dimension_lower for token in ("concentration", "amount/vol", "mass/vol", "mol/vol")):
-                    return True
-                if dimension_lower in {"amount", "substance", "mass"}:
-                    return False
-            if not units_lower:
-                return False
-            if "molar" in units_lower or "mol/" in units_lower or "mole/" in units_lower:
-                return True
-            if "/" in units_lower:
-                return True
-            return False
-
-        is_concentration = _looks_like_concentration()
-        if is_concentration:
-            compartment_name = entry.compartment
-            compartment_volume = context.get(compartment_name, self.compartments.get(compartment_name))
-            if compartment_volume in (None, 0.0):
-                raise RuntimeError(f"Missing compartment volume for dose target {target}")
-            delta = amount / compartment_volume
         def _label(value: Optional[str], fallback: str) -> str:
             if value is None:
                 return fallback
@@ -378,6 +368,7 @@ class FrozenModel:
             text = str(value).strip()
             return text or fallback
 
+        is_concentration = delta != amount_mol
         dimension_label = _label(entry.interpreted_dimension, "molarity" if is_concentration else "amount")
         units_label = _label(entry.units, "molarity" if is_concentration else "mole")
         current_value = context.get(entry.identifier, 0.0)
@@ -388,7 +379,7 @@ class FrozenModel:
             "interpreted_dimension": dimension_label,
             "units": units_label,
             "compartment": entry.compartment,
-            "compartment_volume_l": context.get(entry.compartment, self.compartments.get(entry.compartment)),
+            "compartment_volume_l": compartment_volume,
             "delta_state_value": delta,
             "delta_amount_mol": amount_mol,
         }
@@ -563,6 +554,27 @@ def _load_species(path: Path) -> Tuple[List[SpeciesEntry], Dict[str, float], Lis
     return species, constants, tokens
 
 
+def _parse_dependencies(raw_value: object) -> List[str]:
+    if raw_value in (None, "", [], ()):
+        return []
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text or text.lower() == "nan":
+            return []
+        try:
+            parsed = ast.literal_eval(text)
+        except Exception:
+            parts = [part.strip().strip("\"'") for part in text.split(",")]
+            return [part for part in parts if part]
+        else:
+            if isinstance(parsed, (list, tuple)):
+                return [str(item) for item in parsed]
+            return [str(parsed)]
+    if isinstance(raw_value, (list, tuple, set)):
+        return [str(item) for item in raw_value]
+    return [str(raw_value)]
+
+
 def _load_parameters(path: Path) -> Tuple[Dict[str, float], List[str], Dict[str, Dict[str, object]]]:
     rows = _load_rows(path)
     graph = ParameterGraph(convert_parameter_value)
@@ -571,22 +583,57 @@ def _load_parameters(path: Path) -> Tuple[Dict[str, float], List[str], Dict[str,
         name = str(row.get("name"))
         units = str(row.get("units", "")) if row.get("units") is not None else ""
         value = row.get("value")
+        if isinstance(value, float) and math.isnan(value):
+            value = None
+        expression_raw = row.get("expression", "") or ""
+        if isinstance(expression_raw, float) and math.isnan(expression_raw):
+            expression_raw = ""
+        dependencies = _parse_dependencies(row.get("derived_from"))
         if value is None:
             graph.add_spec(
                 name=name,
                 unit=units,
-                expression=row.get("expression", "") or "",
-                dependencies=[str(dep) for dep in row.get("derived_from", []) or []],
+                expression=str(expression_raw),
+                dependencies=dependencies,
                 value=None,
             )
             continue
         graph.add_base(name, float(value), units)
         order.append(name)
     resolved = graph.evaluate()
-    for name in graph.metadata:
+    metadata = dict(graph.metadata)
+    _inject_pk_microconstants(resolved, metadata)
+    for name in metadata:
         if name not in order:
             order.append(name)
-    return resolved, order, graph.metadata
+    return resolved, order, metadata
+
+
+def _inject_pk_microconstants(parameters: Dict[str, float], metadata: Dict[str, Dict[str, object]]) -> None:
+    combos = [
+        ("k_el", "CL", "V_C"),
+        ("k12", "Q_P", "V_C"),
+        ("k21", "Q_P", "V_P"),
+    ]
+
+    for target, numerator, denominator in combos:
+        if target in parameters:
+            continue
+        num_value = parameters.get(numerator)
+        denom_value = parameters.get(denominator)
+        if num_value is None or denom_value in (None, 0.0):
+            continue
+        derived_value = num_value / denom_value
+        parameters[target] = derived_value
+        metadata[target] = {
+            "type": "auto_derived",
+            "unit": "1/day",
+            "raw_value": derived_value,
+            "canonical_value": derived_value,
+            "dependencies": [numerator, denominator],
+            "expression": f"{numerator}/{denominator}",
+            "note": "pk_micro_constant",
+        }
 
 
 def _load_compartments(path: Path) -> Tuple[Dict[str, float], List[str]]:
@@ -972,6 +1019,15 @@ def _load_frozen_model_cached(model_dir_str: str) -> FrozenModel:
 
     constants = constant_species.copy()
 
+    unit_meta = {
+        name: {
+            **meta,
+            "canonical_value": meta.get("canonical_value", parameters.get(name)),
+        }
+        for name, meta in parameter_meta.items()
+    }
+    unit_meta_json = json.dumps(unit_meta, sort_keys=True, default=str)
+
     species_lookup = {entry.identifier: entry for entry in species}
     species_name_lookup = {entry.name: entry for entry in species}
     events = _load_events(model_dir / "events.csv", ode_tokens, safe_names, reverse_safe)
@@ -998,7 +1054,8 @@ def _load_frozen_model_cached(model_dir_str: str) -> FrozenModel:
         "sympy_version": sp.__version__,
         "parser_flags": "default_v1",
         "units_map": json.dumps(species_units, sort_keys=True),
-        "parameter_graph": json.dumps(parameter_meta, sort_keys=True, default=str),
+        "parameter_graph": unit_meta_json,
+        "unit_normalisation_map": unit_meta_json,
     }
 
     return FrozenModel(

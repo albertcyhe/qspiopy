@@ -121,13 +121,11 @@ CI gates are green and the BH checks pass.
 
 ## Latest Alignment Gate (A1)
 
-- **Command:** `python -m scripts.validate_surrogate --scenarios A1 --dump-t0 --numeric-gates --output artifacts/extended_validation`
+- **Command:** `python -m scripts.validate_surrogate --scenarios A1 --dump-t0 --numeric-gates --output artifacts/validation`
 - **Status:** ❌ (numeric gate failed)
-- **Violations (alignment_metrics_extended.csv):**
-  - `tumour_volume_l`: rel_L2 = 7.09e-1, maxRE = 2.04e+0
-  - `pd1_occupancy`: rel_L2 = 5.73e-1, maxRE = 7.58e-1
-  - `tcell_density_per_ul`: rel_L2 = 9.92e-1, maxRE = 9.94e-1
-  - `drug_plasma_molar`: rel_L2 = 1.60e+0, maxRE = 4.55e+0
-  - `drug_tumor_molar`: rel_L2 = 2.37e+0, maxRE = 6.10e+0
-- **Dose audit parity:** `A1_surrogate_dose_audit.csv` vs `A1_reference_dose_audit.csv` still mismatch on interpreted dimensions (`nan` vs `molarity`).
-- **Next steps:** trace unit/parameter families (CL/Q, kon/koff, tumour volume rules) and ensure event-time residuals and repeated assignments are reconciled immediately after each dose/event.
+- **Violations (`artifacts/validation/A1_surrogate.csv` vs `A1_reference.csv`):**
+  - `tumour_volume_l`: rel_L2 = 1.417e-1, maxRE = 1.916e-1
+  - `pd1_occupancy`: rel_L2 = 1.0, maxRE = 1.0 (surrogate stays ~0 while MATLAB shows expected dynamics)
+  - `tcell_density_per_ul`: rel_L2 = 7.862e-1, maxRE = 7.999e-1
+- **Dose audit parity:** numerical deltas now agree, but the surrogate still labels the PD-1 central species as `interpreted_dimension=amount` while MATLAB reports `molarity`, so the audits differ textually (`artifacts/validation/A1_dose_audit.csv` vs `_reference_dose_audit.csv`).
+- **Next steps:** inspect tumour module rules (volume ↔ diameter mapping), PD-1 occupancy/repeated assignments, and the T-cell density calculation to close the remaining semantic gaps before expanding to A2–A6/B*.
