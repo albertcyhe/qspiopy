@@ -52,6 +52,12 @@ class ScheduledEvent:
     assignments: str = field(compare=False)
 
 
+@dataclass(frozen=True)
+class TriggerEventSpec:
+    entry: EventEntry
+    fn: Callable[[float, np.ndarray], float]
+
+
 def _process_pending_events(
     *,
     time_point: float,
@@ -120,7 +126,7 @@ def run_segmented_integration(
     solver_config: SolverConfig,
     scheduled_doses: Sequence[ScheduledDose],
     pending_events: List[ScheduledEvent],
-    event_functions: Sequence[Callable],
+    trigger_specs: Sequence[TriggerEventSpec],
     sample_times: np.ndarray,
     samples: Dict[float, np.ndarray],
     state: np.ndarray,
@@ -135,6 +141,12 @@ def run_segmented_integration(
     time_key: Callable[[float], float],
     event_log: Optional[List[Dict[str, object]]] = None,
     jac_sparsity: Optional[np.ndarray] = None,
+    record_state: Optional[
+        Callable[
+            [float, np.ndarray, str, str, Optional[int], Optional[str], Optional[str], Optional[str]],
+            None,
+        ]
+    ] = None,
 ) -> Tuple[np.ndarray, Dict[str, float], float, int]:
     """Integrate between discontinuities while replaying events/doses."""
 
@@ -151,6 +163,8 @@ def run_segmented_integration(
     )
     current_time = start_time
     segment_index = 0
+    trigger_functions = [spec.fn for spec in trigger_specs]
+    trigger_entries = [spec.entry for spec in trigger_specs]
 
     while segment_index < len(segment_points) - 1 and current_time < stop_time - tol_time:
         target_time = segment_points[segment_index + 1]
@@ -182,7 +196,7 @@ def run_segmented_integration(
                 max_step=solver_config.max_step,
                 first_step=_initial_step(current_time, integration_stop),
                 dense_output=True,
-                events=event_functions if event_functions else None,
+                events=trigger_functions if trigger_functions else None,
                 jac_sparsity=jac_sparsity,
                 vectorized=False,
             )
@@ -196,14 +210,17 @@ def run_segmented_integration(
                 raise NumericsError(f"Integration failed at t={current_time}: {sol.message}")
 
             triggered_pairs: List[Tuple[float, EventEntry]] = []
-            if sol.t_events and event_functions:
+            if sol.t_events and trigger_functions:
                 for idx, times in enumerate(sol.t_events):
+                    entry = trigger_entries[idx]
                     for time_val in np.atleast_1d(times):
-                        triggered_pairs.append((float(time_val), model.events[idx]))
+                        triggered_pairs.append((float(time_val), entry))
 
             if triggered_pairs:
                 triggered_pairs.sort(key=lambda pair: (pair[0], pair[1].index))
                 event_time = triggered_pairs[0][0]
+                if record_state:
+                    record_state(event_time, state.copy(), "pre", "event", triggered_pairs[0][1].index, triggered_pairs[0][1].name, None, None)
                 record_solution_samples(samples, sample_times, current_time, event_time, sol, model, inclusive=False)
                 if sol.sol is not None:
                     state = np.asarray(sol.sol(event_time), dtype=float)
@@ -247,8 +264,11 @@ def run_segmented_integration(
                     for assignment in entry.assignments:
                         value = assignment.compiled.evaluate(context) if assignment.compiled is not None else 0.0
                         model._apply_target_value(assignment.target, value, context, state)
-                context = reconcile(state)
+                    context = reconcile(state)
                 samples[time_key(event_time)] = state.copy()
+                if record_state:
+                    last_entry = same_time_entries[-1] if same_time_entries else triggered_pairs[0][1]
+                    record_state(event_time, state.copy(), "post", "event", last_entry.index, last_entry.name, None, None)
                 current_time = float(np.nextafter(event_time, np.inf))
                 continue
 
@@ -303,10 +323,14 @@ def run_segmented_integration(
                 batch.append(scheduled_doses[dose_index])
                 dose_index += 1
             for scheduled_dose in _coalesce_same_time_doses(batch, tol=tol_time):
+                if record_state:
+                    record_state(current_time, state.copy(), "pre", "dose", None, scheduled_dose.dose.name, scheduled_dose.dose.target, scheduled_dose.dose.name)
                 audit_info = model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, state)
                 context = reconcile(state)
                 samples[time_key(current_time)] = state.copy()
                 record_dose_audit(current_time, scheduled_dose, audit_info)
+                if record_state:
+                    record_state(current_time, state.copy(), "post", "dose", None, scheduled_dose.dose.name, scheduled_dose.dose.target, scheduled_dose.dose.name)
 
         if current_time >= stop_time - tol_time:
             break

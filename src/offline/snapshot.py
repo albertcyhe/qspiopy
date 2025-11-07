@@ -24,6 +24,7 @@ from .entities import (
     SpeciesEntry,
 )
 from .errors import SnapshotError
+from .units import convert_amount, convert_parameter_value, convert_volume
 
 
 class FrozenModel:
@@ -322,22 +323,28 @@ class FrozenModel:
 
     def apply_dose(self, dose: DoseEntry, amount: float, context: Dict[str, float], state: np.ndarray) -> Dict[str, object]:
         target = dose.target
+        amount_units = dose.amount_units or "mole"
+        mw = getattr(dose, "molecular_weight_g_per_mol", None)
+        try:
+            amount_mol = convert_amount(amount, amount_units, mw)
+        except ValueError:
+            amount_mol = amount
         entry = self.species_lookup.get(target)
         if entry is None and target in self.species_name_lookup:
             entry = self.species_name_lookup[target]
         if entry is None:
-            new_value = context.get(target, 0.0) + amount
+            new_value = context.get(target, 0.0) + amount_mol
             self._apply_target_value(target, new_value, context, state)
             return {
                 "target": target,
-                "interpreted_dimension": None,
-                "units": None,
+                "interpreted_dimension": "amount",
+                "units": "mole",
                 "compartment": None,
                 "compartment_volume_l": None,
-                "delta_state_value": amount,
-                "delta_amount_mol": amount,
+                "delta_state_value": amount_mol,
+                "delta_amount_mol": amount_mol,
             }
-        delta = amount
+        delta = amount_mol
         units_lower = (entry.units or "").lower()
         dimension_lower = (entry.interpreted_dimension or "").lower()
 
@@ -362,17 +369,27 @@ class FrozenModel:
             if compartment_volume in (None, 0.0):
                 raise RuntimeError(f"Missing compartment volume for dose target {target}")
             delta = amount / compartment_volume
+        def _label(value: Optional[str], fallback: str) -> str:
+            if value is None:
+                return fallback
+            if isinstance(value, float) and math.isnan(value):
+                return fallback
+            text = str(value).strip()
+            return text or fallback
+
+        dimension_label = _label(entry.interpreted_dimension, "molarity" if is_concentration else "amount")
+        units_label = _label(entry.units, "molarity" if is_concentration else "mole")
         current_value = context.get(entry.identifier, 0.0)
         new_value = current_value + delta
         self._apply_target_value(entry.identifier, new_value, context, state)
         return {
             "target": entry.identifier,
-            "interpreted_dimension": entry.interpreted_dimension,
-            "units": entry.units,
+            "interpreted_dimension": dimension_label,
+            "units": units_label,
             "compartment": entry.compartment,
             "compartment_volume_l": context.get(entry.compartment, self.compartments.get(entry.compartment)),
             "delta_state_value": delta,
-            "delta_amount_mol": amount,
+            "delta_amount_mol": amount_mol,
         }
 
     def rhs(self, t: float, y: np.ndarray) -> np.ndarray:
@@ -418,6 +435,18 @@ def _load_flux_expressions(path: Path) -> Dict[str, str]:
             else:
                 break
     return fluxes
+
+
+def _load_rows(path: Path) -> List[Dict[str, object]]:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        with path.open("r", encoding="utf8") as handle:
+            data = json.load(handle)
+        if isinstance(data, list):
+            return data
+        raise SnapshotError(f"Unsupported JSON structure in {path}")
+    frame = _read_csv(path)
+    return [row._asdict() for row in frame.itertuples(index=False)]
 
 
 def _load_configset(path: Path) -> Dict[str, object]:
@@ -534,78 +563,86 @@ def _load_species(path: Path) -> Tuple[List[SpeciesEntry], Dict[str, float], Lis
 
 
 def _load_parameters(path: Path) -> Tuple[Dict[str, float], List[str]]:
-    frame = _read_csv(path)
-    params: Dict[str, float] = {}
-    for row in frame.itertuples(index=False):
-        name = str(row.name)
-        value = float(row.value)
-        units = str(row.units) if hasattr(row, "units") else ""
-        params[name] = _convert_parameter_value(value, units)
-    return params, list(params.keys())
+    rows = _load_rows(path)
+    base_params: Dict[str, float] = {}
+    derived_specs: List[Dict[str, object]] = []
+    order: List[str] = []
+    for row in rows:
+        name = str(row.get("name"))
+        units = str(row.get("units", "")) if row.get("units") is not None else ""
+        value = row.get("value")
+        if value is None:
+            derived_specs.append(row)
+            continue
+        converted = convert_parameter_value(float(value), units)
+        base_params[name] = converted
+        order.append(name)
+    resolved = _evaluate_derived_parameters(base_params, derived_specs)
+    for spec in derived_specs:
+        name = str(spec.get("name"))
+        if name in resolved and name not in order:
+            order.append(name)
+    return resolved, order
 
 
 def _load_compartments(path: Path) -> Tuple[Dict[str, float], List[str]]:
-    frame = _read_csv(path)
+    rows = _load_rows(path)
     comps: Dict[str, float] = {}
-    for row in frame.itertuples(index=False):
-        name = str(row.name)
-        value = float(row.capacity)
-        units = str(row.units) if hasattr(row, "units") else ""
+    order: List[str] = []
+    for row in rows:
+        name = str(row.get("name"))
+        value = float(row.get("capacity", 0.0))
+        units = str(row.get("units", "")) if row.get("units") is not None else ""
         comps[name] = _convert_compartment_value(value, units)
-    return comps, list(comps.keys())
+        order.append(name)
+    return comps, order
 
 
 def _convert_compartment_value(value: float, units: str) -> float:
-    if not units:
-        return value
-    u = units.lower()
-    if u == "microliter":
-        return value * 1e-6
-    if u == "millimeter^3":
-        return value * 1e-6
-    if u in {"litre", "liter"}:
-        return value
-    return value
+    return convert_volume(value, units)
 
 
 def _convert_parameter_value(value: float, units: str) -> float:
-    if not units:
-        return value
-    u = units.lower()
-    if u == "dimensionless":
-        return value
-    if u == "microliter":
-        return value * 1e-6
-    if u == "millimeter^3":
-        return value * 1e-6
-    if u == "micrometer^3":
-        return value * 1e-15
-    if u == "micrometer^3/cell":
-        return value * 1e-15
-    if u in {"litre", "liter"}:
-        return value
-    if u == "cell/milliliter":
-        return value * 1000.0
-    if u == "micromolarity":
-        return value * 1e-6
-    if u == "nanomolarity":
-        return value * 1e-9
-    if u == "nanomole/cell/hour":
-        return value * 1e-9 * 24.0
-    if u == "1/minute":
-        return value * 1440.0
-    if u == "1/second":
-        return value * 86400.0
-    if u == "1/(centimeter^3*minute)":
-        return value * 1e3 * 1440.0
-    if u == "1/day/milliliter":
-        return value * 1000.0
-    if u == "1/(molarity*second)":
-        return value * 86400.0
-    if u == "1/(micromolarity*nanometer*second)":
-        # Convert uM^-1 * nm^-1 * s^-1 (SimBiology default) into day^-1 with litre-based volumes.
-        return value * 9.8412890625
-    return value
+    return convert_parameter_value(value, units)
+
+
+def _evaluate_derived_parameters(
+    base_params: Dict[str, float],
+    derived_specs: Sequence[Dict[str, object]],
+) -> Dict[str, float]:
+    resolved = dict(base_params)
+    remaining = list(derived_specs)
+
+    def _evaluate_expression(expr: str, values: Sequence[float]) -> float:
+        substituted = expr
+        for idx, val in enumerate(values, start=1):
+            substituted = substituted.replace(f"p({idx})", f"({val})")
+        safe_locals = {"__builtins__": None, "pi": math.pi, "e": math.e}
+        return float(eval(substituted, safe_locals, {}))
+
+    while remaining:
+        progress = False
+        for spec in list(remaining):
+            name = str(spec.get("name"))
+            deps = [str(dep) for dep in spec.get("derived_from", []) or []]
+            if any(dep not in resolved for dep in deps):
+                continue
+            expr = spec.get("expression")
+            units = str(spec.get("units", "")) if spec.get("units") is not None else ""
+            if expr:
+                values = [resolved[dep] for dep in deps]
+                raw_value = _evaluate_expression(expr, values)
+            elif spec.get("value") is not None:
+                raw_value = float(spec.get("value"))
+            else:
+                continue
+            resolved[name] = convert_parameter_value(raw_value, units)
+            remaining.remove(spec)
+            progress = True
+        if not progress:
+            unresolved = [str(spec.get("name")) for spec in remaining]
+            raise SnapshotError(f"Unable to resolve derived parameters: {unresolved}")
+    return resolved
 
 
 def _load_rules(
@@ -775,34 +812,32 @@ def _load_events(
 
 
 def _load_doses(path: Path) -> List[DoseEntry]:
-    frame = _read_csv(path)
+    rows = _load_rows(path)
     doses: List[DoseEntry] = []
-    for row in frame.itertuples(index=False):
-        amount = 0.0 if pd.isna(row.amount) else float(row.amount)
-        amount_units = "" if pd.isna(row.amount_units) else str(row.amount_units)
-        rate = None
-        if hasattr(row, "rate") and not pd.isna(row.rate):
-            rate = float(row.rate)
-        rate_units = ""
-        if hasattr(row, "rate_units") and not pd.isna(row.rate_units):
-            rate_units = str(row.rate_units)
-        duration = None
-        if hasattr(row, "duration") and not pd.isna(row.duration):
-            duration = float(row.duration)
+    for row in rows:
+        amount = float(row.get("amount", 0.0) or 0.0)
+        amount_units = str(row.get("amount_units", "")) if row.get("amount_units") is not None else ""
+        rate = row.get("rate")
+        rate_units = str(row.get("rate_units", "")) if row.get("rate_units") is not None else ""
+        duration = row.get("duration")
+        amount_mg = row.get("amount_mg")
+        mw = row.get("molecular_weight_g_per_mol")
         doses.append(
             DoseEntry(
-                index=int(row.dose_index),
-                name=str(row.name),
-                dose_type=str(row.type),
-                target=str(row.target),
+                index=int(row.get("dose_index", len(doses) + 1)),
+                name=str(row.get("name")),
+                dose_type=str(row.get("type", row.get("dose_type", ""))),
+                target=str(row.get("target")),
                 amount=amount,
                 amount_units=amount_units,
-                start_time=float(row.start_time),
-                interval=float(row.interval),
-                repeat_count=int(row.repeat_count),
-                rate=rate,
+                start_time=float(row.get("start_time", 0.0)),
+                interval=float(row.get("interval", 0.0)),
+                repeat_count=int(row.get("repeat_count", 0)),
+                rate=float(rate) if rate not in (None, "") else None,
                 rate_units=rate_units,
-                duration=duration,
+                duration=float(duration) if duration not in (None, "") else None,
+                amount_mg=float(amount_mg) if amount_mg not in (None, "") else None,
+                molecular_weight_g_per_mol=float(mw) if mw not in (None, "") else None,
             )
         )
     return doses

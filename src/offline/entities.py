@@ -186,6 +186,7 @@ class DoseEntry:
     rate_units: str = ""
     duration: Optional[float] = None
     amount_mg: Optional[float] = None
+    molecular_weight_g_per_mol: Optional[float] = None
 
 
 @dataclass(frozen=True, order=True)

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Mapping, Sequence
 
 from src.offline import DoseEntry
+from src.offline.units import convert_amount
 
 HOUR = 1.0
 DAY = 24.0
@@ -14,8 +15,8 @@ PD1_TARGET_DEFAULT = "V_C.nivolumab"
 CTLA4_TARGET_DEFAULT = "V_C.ipililumab"
 
 DRUG_PROPERTIES = {
-    PD1_TARGET_DEFAULT: ("nivolumab", 1.436e8),
-    CTLA4_TARGET_DEFAULT: ("ipilimumab", 1.486349e8),
+    PD1_TARGET_DEFAULT: ("nivolumab", 1.436e5),  # grams per mole
+    CTLA4_TARGET_DEFAULT: ("ipilimumab", 1.486349e5),
 }
 
 
@@ -27,7 +28,7 @@ class Dose:
     amount_mg: float
     drug: str
     target: str
-    molecular_weight_mg_per_mol: float
+    molecular_weight_g_per_mol: float
     interval_hours: float = 0.0
     repeat: int = 0
 
@@ -50,7 +51,7 @@ class ScenarioSpec:
 def _build_repeat_series(interval_hours: float, occurrences: int, dose_mg: float, target: str) -> List[Dose]:
     drug, mw = _resolve_drug(target)
     return [
-        Dose(time_hours=i * interval_hours, amount_mg=dose_mg, drug=drug, target=target, molecular_weight_mg_per_mol=mw)
+        Dose(time_hours=i * interval_hours, amount_mg=dose_mg, drug=drug, target=target, molecular_weight_g_per_mol=mw)
         for i in range(occurrences)
     ]
 
@@ -126,7 +127,7 @@ def a_series(snapshot: str = "example1") -> List[ScenarioSpec]:
                     amount_mg=800.0,
                     drug=_resolve_drug(PD1_TARGET_DEFAULT)[0],
                     target=PD1_TARGET_DEFAULT,
-                    molecular_weight_mg_per_mol=_resolve_drug(PD1_TARGET_DEFAULT)[1],
+                    molecular_weight_g_per_mol=_resolve_drug(PD1_TARGET_DEFAULT)[1],
                 )
             ]
             + _build_repeat_series(21 * DAY, 3, 200.0, PD1_TARGET_DEFAULT),
@@ -163,7 +164,7 @@ def microdose(snapshot: str = "example1") -> ScenarioSpec:
                 amount_mg=1.0,
                 drug=drug,
                 target=PD1_TARGET_DEFAULT,
-                molecular_weight_mg_per_mol=mw,
+                molecular_weight_g_per_mol=mw,
             )
         ],
         context_outputs={
@@ -207,14 +208,14 @@ def b_series(snapshot: str = "example1") -> List[ScenarioSpec]:
                     amount_mg=70.0,
                     drug=_resolve_drug(CTLA4_TARGET_DEFAULT)[0],
                     target=CTLA4_TARGET_DEFAULT,
-                    molecular_weight_mg_per_mol=_resolve_drug(CTLA4_TARGET_DEFAULT)[1],
+                    molecular_weight_g_per_mol=_resolve_drug(CTLA4_TARGET_DEFAULT)[1],
                 ),
                 Dose(
                     time_hours=49 * DAY,
                     amount_mg=70.0,
                     drug=_resolve_drug(CTLA4_TARGET_DEFAULT)[0],
                     target=CTLA4_TARGET_DEFAULT,
-                    molecular_weight_mg_per_mol=_resolve_drug(CTLA4_TARGET_DEFAULT)[1],
+                    molecular_weight_g_per_mol=_resolve_drug(CTLA4_TARGET_DEFAULT)[1],
                 ),
             ],
             context_outputs={
@@ -245,10 +246,10 @@ def doses_to_entries(
     *,
     index_offset: int = 50_000,
 ) -> List[DoseEntry]:
-    """Convert registry doses to DoseEntry objects (flat mg → mol conversion)."""
+    """Convert registry doses to DoseEntry objects (mg + MW → mol conversion)."""
     entries: List[DoseEntry] = []
     for idx, dose in enumerate(doses, start=1):
-        amount_moles = dose.amount_mg / dose.molecular_weight_mg_per_mol
+        amount_moles = convert_amount(dose.amount_mg, "milligram", dose.molecular_weight_g_per_mol)
         entries.append(
             DoseEntry(
                 index=index_offset + idx,

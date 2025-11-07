@@ -2,21 +2,18 @@
 
 ---
 
-## 总览（里程碑）
+## 总览（里程碑与进度）
 
-* **M1 — 事件语义完全对齐**：支持**状态触发事件**、同刻并发事件顺序、事件**pre/post 双记录**、统一 **ε‑bump** 与**受控 first_step**、事件后 **reconcile**。
-* **M2 — 单位与参数**：引入 `units.py` 统一换算（time/volume/amount/concentration、kon/koff、CL/Q/γ 等），剂量维度判定与 mg↔mol↔浓度一体化；参数派生/表达式求值。
-* **M3 — 初始化与模块化**：提供“按目标直径/体积求初始条件”的初始化例程；抽象出模块使 cancer / antigen‑APC‑MHC / T-cell 可插拔。
-* **M4 — 多克隆与体积动力学**：实现克隆竞争/总载量约束；**肿瘤体积**随 C/T/dead 动态反馈，支持伪进展。
-* **M5 — 验收与CI**：补齐组件测试（事件/延迟/剂量微段）、数值门（1e‑3/5e‑3 阈值）、A1 对齐绿灯；把 validate_surrogate 的挂起点“最小化重构+详日志”。
+| 里程碑 | 目标 | 当前状态 |
+| --- | --- | --- |
+| **M1 事件语义** | 状态触发 + 同刻顺序 + pre/post 双记录 + ε‑bump + first_step + 事件后 reconcile | ✅ 已实现：schedule 清洁、聚合同刻剂量、延迟事件队列、trigger specs、metadata (`phase_code` 等) |
+| **M2 单位与参数** | `units.py` 统一换算（时间/体积/浓度/速率/剂量），参数派生 | ⚠️ 进行中：volume/conc/rate + mg→mol(MW) 转换已接入（registry/剂量审计、fallback、apply_dose 都用 `convert_amount`），参数 JSON 现已支持 derived DAG；待完成：CL/Q/kon/koff 族的剩余单位映射及与 MATLAB 参数表的逐项核对 |
+| **M3 初始化与模块化** | 目标体积初始条件、模块化加载 | ⏳ 未开始 |
+| **M4 多克隆与动态体积** | 体积/伪进展输出 & 克隆竞争 | ⏳ 未开始 |
+| **M5 验收/CI** | 组件测试 + 数值门绿灯 + CI | ⏳ 进行中（validate_surrogate 现已稳定，但 A1 数值门仍未过） |
 
-### 进度跟踪
-
-- [x] Schedule 清洁化（去重/聚合同刻剂量、t=0 护栏、fallback 防重），并在 `segment_integrator` 中一次性应用批量剂量。
-- [x] `validate_surrogate` 默认关闭高成本性能基准（`--benchmark-replicates` 默认为 0），命令不再因 50×400d 基准而超时。
-- [ ] 状态触发事件与 `record(pre/post)` 统一写入。
-- [ ] `units.py` 统一换算、剂量维度判定与 delta 记录一致。
-- [ ] 数值门变绿（A1 rel_L2/maxRE ≤ 1e-3 / 5e-3）。
+- [x] `validate_surrogate` 默认关闭性能基准（`--benchmark-replicates=0`）。
+- [ ] 数值门：A1 仍超标（tumour_volume/pd1_occupancy/tcell_density；PK 尾部），待完成 M2/M4 后重跑 `--numeric-gates`。
 
 ---
 

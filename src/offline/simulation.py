@@ -16,11 +16,8 @@ from scipy.integrate import solve_ivp
 from .entities import BASE_HEADER, DoseEntry, EventEntry, ScenarioResult, ScheduledDose, SEMANTICS_VERSION
 from .errors import AlignmentFail, ConfigError, NumericsError, SnapshotError
 from .snapshot import FrozenModel, load_frozen_model
-from .segment_integrator import (
-    SolverConfig,
-    ScheduledEvent,
-    run_segmented_integration,
-)
+from .units import convert_amount
+from .segment_integrator import SolverConfig, ScheduledEvent, TriggerEventSpec, run_segmented_integration
 
 logger = logging.getLogger(__name__)
 
@@ -129,9 +126,9 @@ def _enumerate_dose_times(dose: DoseEntry, days: float) -> List[float]:
 def _fallback_anti_pd1_doses(model: FrozenModel, days: float) -> List[ScheduledDose]:
     mg_per_kg = 3.0
     patient_weight = 70.0
-    molecular_weight = 1.436e8
+    molecular_weight = 1.436e5
     amount_mg = patient_weight * mg_per_kg
-    amount = amount_mg / molecular_weight
+    amount = convert_amount(amount_mg, "milligram", molecular_weight)
     fallback = DoseEntry(
         index=10_000,
         name="nivolumab_fallback",
@@ -143,6 +140,7 @@ def _fallback_anti_pd1_doses(model: FrozenModel, days: float) -> List[ScheduledD
         interval=14.0,
         repeat_count=30,
         amount_mg=amount_mg,
+        molecular_weight_g_per_mol=molecular_weight,
     )
     schedule: List[ScheduledDose] = []
     for time_point in _enumerate_dose_times(fallback, days):
@@ -481,7 +479,7 @@ def simulate_frozen_model(
     dose_index = 0
     pending_events: List[ScheduledEvent] = []
 
-    def make_event_function(entry: EventEntry):
+    def make_trigger_spec(entry: EventEntry) -> TriggerEventSpec:
         def fn(t, y):
             vec = np.asarray(y, dtype=float)
             ctx = model.build_context_from_state(vec.copy())
@@ -491,11 +489,45 @@ def simulate_frozen_model(
 
         fn.direction = entry.direction
         fn.terminal = False
-        return fn
+        return TriggerEventSpec(entry=entry, fn=fn)
 
-    event_functions = [make_event_function(entry) for entry in model.events]
+    trigger_specs = [make_trigger_spec(entry) for entry in model.events]
     current_state = state
     context = reconcile(current_state)
+
+    phase_codes = {"cont": 0, "pre": 1, "post": 2}
+    kind_codes = {"cont": 0, "dose": 1, "event": 2}
+    record_annotations: Dict[str, Dict[float, object]] = {
+        "phase_code": {},
+        "discontinuity_type": {},
+        "event_index": {},
+        "event_name": {},
+        "dose_name": {},
+        "dose_target": {},
+    }
+
+    def record_state_annotation(
+        time_days: float,
+        vector: np.ndarray,
+        phase: str,
+        kind: str,
+        event_index: Optional[int],
+        event_name: Optional[str],
+        dose_target: Optional[str],
+        dose_name: Optional[str],
+    ) -> None:
+        key = _tkey(time_days)
+        samples[key] = vector.copy()
+        record_annotations["phase_code"][key] = phase_codes.get(phase, 0)
+        record_annotations["discontinuity_type"][key] = kind_codes.get(kind, 0)
+        if event_index is not None:
+            record_annotations["event_index"][key] = event_index
+        if event_name:
+            record_annotations["event_name"][key] = event_name
+        if dose_name:
+            record_annotations["dose_name"][key] = dose_name
+        if dose_target:
+            record_annotations["dose_target"][key] = dose_target
 
     def record_dose_audit(time_days: float, scheduled_dose: ScheduledDose, info: Dict[str, object]) -> None:
         if dose_audit is None:
@@ -507,6 +539,7 @@ def simulate_frozen_model(
                 "dose_name": scheduled_dose.dose.name,
                 "target": scheduled_dose.dose.target,
                 "interpreted_dimension": info.get("interpreted_dimension"),
+                "units": info.get("units"),
                 "compartment": info.get("compartment"),
                 "compartment_volume_l": info.get("compartment_volume_l"),
                 "delta_state_value": info.get("delta_state_value"),
@@ -538,7 +571,7 @@ def simulate_frozen_model(
         solver_config=solver_config,
         scheduled_doses=scheduled_list,
         pending_events=pending_events,
-        event_functions=event_functions,
+        trigger_specs=trigger_specs,
         sample_times=sample_times,
         samples=samples,
         state=current_state,
@@ -553,6 +586,7 @@ def simulate_frozen_model(
         time_key=_tkey,
         event_log=event_log,
         jac_sparsity=jac_pattern,
+        record_state=record_state_annotation,
     )
 
     current_key = _tkey(current_time)
@@ -604,7 +638,21 @@ def simulate_frozen_model(
         tcell_density.append(density)
 
     extras_results: Dict[str, np.ndarray] = {}
+    base_extras = [
+        ("phase_code", record_annotations["phase_code"], float, 0.0),
+        ("discontinuity_type_code", record_annotations["discontinuity_type"], float, 0.0),
+        ("event_index", record_annotations["event_index"], float, 0.0),
+        ("event_name", record_annotations["event_name"], object, ""),
+        ("dose_name", record_annotations["dose_name"], object, ""),
+        ("dose_target", record_annotations["dose_target"], object, ""),
+    ]
     extra_order: List[str] = []
+    for column, mapping, dtype, default in base_extras:
+        extras_results[column] = np.array(
+            [mapping.get(_tkey(t_val), default) for t_val in sample_times],
+            dtype=dtype,
+        )
+        extra_order.append(column)
 
     plugin_sequence: List[ExtraOutputs] = []
     if context_outputs:
