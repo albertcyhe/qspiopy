@@ -88,7 +88,7 @@ def _run_model(model: DummyModel, event_entry: EventEntry, state0: float, stop_t
     def record_dose(*args, **kwargs):
         return
 
-    def reconcile(vec):
+    def reconcile(vec, t=0.0):
         ctx_local = model.build_context_from_state(vec.copy())
         model.sync_state_from_context(ctx_local, vec)
         return ctx_local

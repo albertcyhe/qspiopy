@@ -27,6 +27,7 @@ from .segment_integrator import (
     TriggerEventSpec,
     T0Options,
     run_segmented_integration,
+    warm_start_quarantine,
 )
 
 logger = logging.getLogger(__name__)
@@ -488,15 +489,20 @@ def simulate_frozen_model(
     sample_times = _merge_close_times(sample_times)
     tol_time = _TIME_TOL
 
-    def reconcile(vec: np.ndarray) -> Dict[str, float]:
+    def reconcile(vec: np.ndarray, time_point: Optional[float] = None) -> Dict[str, float]:
         ctx = model.build_context_from_state(vec.copy())
+        if time_point is not None:
+            t_val = float(time_point)
+            ctx["time"] = t_val
+            ctx["time_days"] = t_val
+            ctx["t"] = t_val
         model.evaluate_repeated_assignments(ctx)
         model.apply_algebraic_rules(ctx, vec, mutate=False)
         model.sync_state_from_context(ctx, vec)
         inject_output_aliases(ctx)
         return ctx
 
-    context = context or reconcile(state)
+    context = context or reconcile(state, time_point=0.0)
     _perform_t0_quick_check(model, state, context)
 
     samples: Dict[float, np.ndarray] = {}
@@ -531,39 +537,21 @@ def simulate_frozen_model(
     scheduled_list.sort(key=lambda item: (item.time, item.priority))
     dose_index = 0
     pending_events: List[ScheduledEvent] = []
-
-    trigger_states: Dict[int, Dict[str, bool]] = {}
+    current_state = state
 
     def make_trigger_spec(entry: EventEntry) -> TriggerEventSpec:
-        state = {"armed": True}
-
         def fn(t: float, y: np.ndarray) -> float:
             vec = np.asarray(y, dtype=float)
             ctx = model.build_context_from_state(vec.copy())
             model.evaluate_repeated_assignments(ctx)
             model.apply_algebraic_rules(ctx, vec, mutate=False)
-            value = entry.trigger_compiled.evaluate(ctx)
-            if not state["armed"]:
-                if entry.direction > 0 and value < -_STATE_EVENT_HYSTERESIS:
-                    state["armed"] = True
-                elif entry.direction < 0 and value > _STATE_EVENT_HYSTERESIS:
-                    state["armed"] = True
-                elif entry.direction == 0 and abs(value) > _STATE_EVENT_HYSTERESIS:
-                    state["armed"] = True
-            if not state["armed"]:
-                if entry.direction >= 0:
-                    return max(value, _STATE_EVENT_HYSTERESIS)
-                return min(value, -_STATE_EVENT_HYSTERESIS)
-            return value
+            return float(entry.trigger_compiled.evaluate(ctx))
 
         fn.direction = entry.direction
         fn.terminal = False
-        return TriggerEventSpec(entry=entry, fn=fn, state=state)
+        return TriggerEventSpec(entry=entry, fn=fn, state={})
 
     trigger_specs = [make_trigger_spec(entry) for entry in model.events]
-    initial_trigger_bools = [_evaluate_trigger_bool(entry, context) for entry in model.events]
-    current_state = state
-    context = reconcile(current_state)
 
     phase_codes = {"cont": 0, "pre": 1, "post": 2}
     kind_codes = {"cont": 0, "dose": 1, "event": 2}
@@ -623,7 +611,7 @@ def simulate_frozen_model(
     while dose_index < len(scheduled_list) and abs(scheduled_list[dose_index].time) <= tol_time:
         scheduled_dose = scheduled_list[dose_index]
         audit_info = model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
-        context = reconcile(current_state)
+        context = reconcile(current_state, time_point=0.0)
         samples[_tkey(0.0)] = current_state.copy()
         record_dose_audit(0.0, scheduled_dose, audit_info)
         logger.info(
@@ -636,6 +624,25 @@ def simulate_frozen_model(
 
     jac_pattern = model.jacobian_sparsity()
 
+    current_state = state
+    warm_state, context, start_time = warm_start_quarantine(
+        model=model,
+        solver_config=solver_config,
+        state=current_state,
+        context=context,
+        reconcile=reconcile,
+        samples=samples,
+        time_key=_tkey,
+        pending_events=pending_events,
+        t0_options=t0_opts,
+        jac_sparsity=jac_pattern,
+        tol_time=tol_time,
+        diagnostics=emit_diagnostics,
+    )
+    current_state = warm_state
+    samples.setdefault(_tkey(start_time), current_state.copy())
+    initial_trigger_bools = [_evaluate_trigger_bool(entry, context) for entry in model.events]
+
     current_state, context, current_time, dose_index = run_segmented_integration(
         model=model,
         solver_config=solver_config,
@@ -647,7 +654,7 @@ def simulate_frozen_model(
         samples=samples,
         state=current_state,
         context=context,
-        start_time=0.0,
+        start_time=start_time,
         stop_time=days,
         dose_index=dose_index,
         tol_time=tol_time,
@@ -659,6 +666,7 @@ def simulate_frozen_model(
         jac_sparsity=jac_pattern,
         record_state=record_state_annotation,
         t0_options=t0_opts,
+        diagnostics=emit_diagnostics,
     )
 
     current_key = _tkey(current_time)
