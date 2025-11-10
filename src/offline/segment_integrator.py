@@ -268,13 +268,65 @@ def _bounded_max_step(solver_cap: float, cap_override: Optional[float], enforce:
     return cap_override
 
 
+def _reconcile_with_time(
+    reconcile: Callable[[np.ndarray, float], Dict[str, float]],
+    vec: np.ndarray,
+    time_point: float,
+) -> Dict[str, float]:
+    """Helper to call reconcile(vec) or reconcile(vec, t) depending on signature."""
+    try:
+        return reconcile(vec, time_point)
+    except TypeError:
+        return reconcile(vec)  # type: ignore[misc]
+
+
+def _kick_off_t0(
+    *,
+    model: FrozenModel,
+    state: np.ndarray,
+    context: Dict[str, float],
+    t0: float,
+    dt: float,
+    reconcile: Callable[[np.ndarray, float], Dict[str, float]],
+    method: str = "heun",
+    splits: int = 1,
+    diagnostics: bool = False,
+) -> Tuple[np.ndarray, Dict[str, float], float]:
+    """Deterministic explicit advance away from t=0 before running solve_ivp."""
+
+    now = float(t0)
+    vec = np.asarray(state, dtype=float, copy=True)
+    if dt <= 0.0:
+        return vec, context, now
+    sub_steps = max(int(splits), 1)
+    h = float(dt) / sub_steps
+    for _ in range(sub_steps):
+        k1 = np.asarray(model.rhs(now, vec.copy()), dtype=float)
+        if not np.all(np.isfinite(k1)):
+            raise NumericsError("Warm-start kick encountered non-finite RHS (predictor)")
+        if method.lower() == "heun":
+            y_pred = vec + h * k1
+            k2 = np.asarray(model.rhs(now + h, y_pred.copy()), dtype=float)
+            if not np.all(np.isfinite(k2)):
+                raise NumericsError("Warm-start kick encountered non-finite RHS (corrector)")
+            vec = vec + 0.5 * h * (k1 + k2)
+        else:
+            vec = vec + h * k1
+        now = float(now + h)
+        context = reconcile(vec, now)
+    if diagnostics:
+        logger.info("t0_kick: deterministically advanced to t=%.3e", now)
+    return vec, context, now
+
+
+
 def warm_start_quarantine(
     *,
     model: FrozenModel,
     solver_config: SolverConfig,
     state: np.ndarray,
     context: Dict[str, float],
-    reconcile: Callable[[np.ndarray], Dict[str, float]],
+    reconcile: Callable[[np.ndarray, float], Dict[str, float]],
     samples: Dict[float, np.ndarray],
     time_key: Callable[[float], float],
     pending_events: List[ScheduledEvent],
@@ -320,8 +372,8 @@ def warm_start_quarantine(
             if is_true:
                 triggered_entries.append(entry)
 
-    fire_time = bump_eps
     if triggered_entries and t0_options.fire_t0_true_events_once:
+        fire_time = bump_eps
         current_time = fire_time
         if diagnostics:
             logger.info(
@@ -350,28 +402,56 @@ def warm_start_quarantine(
             for assignment in entry.assignments:
                 value = assignment.compiled.evaluate(context) if assignment.compiled is not None else 0.0
                 model._apply_target_value(assignment.target, float(value), context, state)
-        context = reconcile(state, current_time)
+        context = _reconcile_with_time(reconcile, state, current_time)
         samples[time_key(current_time)] = state.copy()
+
+    state, context, current_time = _kick_off_t0(
+        model=model,
+        state=state,
+        context=context,
+        t0=current_time,
+        dt=bump_eps,
+        reconcile=lambda vec, t: _reconcile_with_time(reconcile, vec, t),
+        method="heun",
+        splits=1,
+        diagnostics=diagnostics,
+    )
+    samples[time_key(current_time)] = state.copy()
 
     max_trials = max(int(t0_options.tiny_segment_trials or 30), 1)
     max_wall = float(t0_options.max_wall_seconds or 0.0)
     start_wall = time.perf_counter()
     failures = 0
-    base_eps = bump_eps
-    current_eps = base_eps
+
+    method_sequence: List[str] = []
+    preferred = str(solver_config.method or "").upper()
+    if preferred and preferred not in {"RADAU", "BDF"}:
+        method_sequence.append(preferred)
+    method_sequence.extend(["RADAU", "BDF", "RK23"])
+    seen_methods: set = set()
+    method_sequence = [
+        method
+        for method in method_sequence
+        if not (method.upper() in seen_methods or seen_methods.add(method.upper()))
+    ]
 
     while current_time < target_window - tol_time:
         if max_wall > 0.0 and (time.perf_counter() - start_wall) > max_wall:
             raise NumericsError(
-                f"Warm-start exceeded wall-clock budget (>{max_wall}s) at t={current_time:.3e}"
+                f"Warm-start exceeded wall-clock budget (> {max_wall}s) at t={current_time:.3e}"
             )
         if failures >= max_trials:
             raise NumericsError(
-                f"Warm-start failed to advance after {max_trials} retries (last eps={current_eps:.3e})"
+                f"Warm-start failed to advance after {max_trials} retries (span≈{target_window-current_time:.3e})"
             )
-        span = min(current_eps, target_window - current_time)
-        first_step = span
-        max_step = span
+
+        span = min(
+            target_window - current_time,
+            max(t0_options.max_step_cap_days or (target_window - current_time), bump_eps),
+        )
+        first_step = min(span, t0_options.first_step_cap_days or span)
+        max_step = min(span, t0_options.max_step_cap_days or span)
+
         if diagnostics:
             logger.info(
                 "t0_warm_try idx=%d span=%.3e first=%.3e max=%.3e t=%.3e->%.3e",
@@ -382,46 +462,67 @@ def warm_start_quarantine(
                 current_time,
                 current_time + span,
             )
-        try:
-            sol = solve_ivp(
-                model.rhs,
-                (current_time, current_time + span),
-                state.copy(),
-                method="RK23",
-                rtol=1e-5,
-                atol=1e-9,
-                first_step=first_step,
-                max_step=max_step,
-                dense_output=False,
-                events=None,
-                jac_sparsity=None,
-                vectorized=False,
-            )
-        except ValueError as exc:
+
+        success = False
+        last_reason = ""
+        for method_name in method_sequence:
+            try:
+                sol = solve_ivp(
+                    model.rhs,
+                    (current_time, current_time + span),
+                    state.copy(),
+                    method=method_name,
+                    rtol=solver_config.rtol,
+                    atol=solver_config.atol,
+                    first_step=first_step,
+                    max_step=max_step,
+                    dense_output=False,
+                    events=None,
+                    jac_sparsity=jac_sparsity if method_name.upper() in {"RADAU", "BDF"} else None,
+                    vectorized=False,
+                )
+            except ValueError as exc:
+                last_reason = str(exc)
+                if diagnostics:
+                    logger.info(
+                        "t0_warm_try idx=%d method=%s ValueError: %s",
+                        failures + 1,
+                        method_name,
+                        exc,
+                    )
+                continue
+
+            if sol.success and sol.y.size and np.isfinite(sol.y).all():
+                state = np.asarray(sol.y[:, -1], dtype=float)
+                current_time = float(sol.t[-1])
+                _ensure_rhs_is_finite(current_time, state)
+                context = _reconcile_with_time(reconcile, state, current_time)
+                samples[time_key(current_time)] = state.copy()
+                failures = 0
+                success = True
+                if diagnostics:
+                    logger.info(
+                        "t0_warm_try idx=%d succeeded with method=%s at t=%.3e",
+                        failures,
+                        method_name,
+                        current_time,
+                    )
+                break
+            last_reason = sol.message or "solver failed"
             if diagnostics:
-                logger.info("t0_warm_try idx=%d ValueError: %s", failures + 1, exc)
-            current_eps = max(current_eps * 0.5, np.finfo(float).eps)
-            failures += 1
+                logger.info(
+                    "t0_warm_try idx=%d method=%s failed: %s",
+                    failures + 1,
+                    method_name,
+                    last_reason,
+                )
+
+        if success:
             continue
 
-        if not sol.success or not sol.y.size or not np.isfinite(sol.y).all():
-            reason = sol.message or "solver failed"
-            if diagnostics:
-                logger.info("t0_warm_try idx=%d failed: %s", failures + 1, reason)
-            current_eps = max(current_eps * 0.5, np.finfo(float).eps)
-            failures += 1
-            continue
-
-        state = np.asarray(sol.y[:, -1], dtype=float)
-        current_time = float(sol.t[-1])
-        _ensure_rhs_is_finite(current_time, state)
-        context = reconcile(state, current_time)
-        samples[time_key(current_time)] = state.copy()
-        current_eps = base_eps
-        failures = 0
+        failures += 1
 
     return state, context, current_time
-
 
 def run_segmented_integration(
     *,
