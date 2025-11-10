@@ -486,8 +486,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--emit-diagnostics", action="store_true", help="Emit solver/banner diagnostics and error tables")
     parser.add_argument("--numeric-gates", action="store_true", help="Enforce rel_L2/maxRE/event timing thresholds")
     parser.add_argument("--dump-t0", action="store_true", help="Copy equations_eval_t0.csv into the output directory")
-    parser.add_argument("--ic-mode", choices=["snapshot", "target_volume"], default="snapshot")
-    parser.add_argument("--ic-target-diam-cm", type=float, default=2.0)
+    parser.add_argument("--ic-mode", choices=["snapshot", "target_volume"], default="target_volume")
+    parser.add_argument("--ic-target-diam-cm", type=float, default=0.5)
     parser.add_argument(
         "--ic-reset-policy",
         choices=["all_zero", "cancer_only", "custom"],
@@ -500,6 +500,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         default=[],
         help="fnmatch pattern(s) of state identifiers to preserve when reset_policy=custom",
     )
+    parser.add_argument("--ic-max-days", type=float, default=150.0)
+    parser.add_argument("--ic-max-wall-seconds", type=float, default=20.0)
     parser.add_argument(
         "--module-block",
         action="append",
@@ -543,6 +545,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         target_diameter_cm=args.ic_target_diam_cm,
         reset_policy=args.ic_reset_policy,
         preserve_patterns=preserve_patterns,
+        max_days=args.ic_max_days,
+        max_wall_seconds=args.ic_max_wall_seconds,
     )
     param_overrides = _parse_param_overrides(args.param_override or [])
     module_blocks = [block.strip() for block in (args.module_block or []) if block and block.strip()]

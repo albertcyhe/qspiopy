@@ -21,7 +21,13 @@ from .initial_conditions import ICOptions, generate_initial_conditions
 from .modules import apply_parameter_overrides, disable_repeated_assignments
 from .snapshot import FrozenModel, load_frozen_model
 from .units import convert_amount
-from .segment_integrator import SolverConfig, ScheduledEvent, TriggerEventSpec, run_segmented_integration
+from .segment_integrator import (
+    SolverConfig,
+    ScheduledEvent,
+    TriggerEventSpec,
+    T0Options,
+    run_segmented_integration,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +46,8 @@ _T0_ABS_TOL = 1e-12
 _TIME_KEY_DIGITS = 12
 _MAX_SEG_ATTEMPTS = 8
 _MICRO_SNAP = 5e-9
+_STATE_EVENT_HYSTERESIS = 1e-6
+_STATE_EVENT_HYSTERESIS = 1e-6
 
 
 def _tkey(value: float) -> float:
@@ -390,8 +398,9 @@ def simulate_frozen_model(
     custom_doses: Optional[Sequence[DoseEntry]] = None,
     context_outputs: Optional[Mapping[str, str]] = None,
     dose_audit: Optional[List[Dict[str, object]]] = None,
-    ic_mode: str = "snapshot",
+    ic_mode: str = "target_volume",
     ic_options: Optional[ICOptions] = None,
+    t0_options: Optional[T0Options] = None,
     param_overrides: Optional[Dict[str, float]] = None,
     module_blocks: Optional[Sequence[str]] = None,
 ) -> ScenarioResult:
@@ -434,6 +443,16 @@ def simulate_frozen_model(
     )
     _log_solver_banner(model, solver_config, days, emit_diagnostics)
     _time_unit_sniff(model, sample_interval_hours)
+    t0_opts = t0_options or T0Options()
+    if emit_diagnostics:
+        logger.info(
+            "t0_options debounce_window=%g bump_eps=%g first_step_cap=%g max_step_cap=%g nan_guard=%s",
+            t0_opts.debounce_window_days,
+            t0_opts.bump_eps_days,
+            t0_opts.first_step_cap_days,
+            t0_opts.max_step_cap_days,
+            t0_opts.nan_guard,
+        )
 
     if seed is not None:
         np.random.seed(seed)
@@ -443,11 +462,21 @@ def simulate_frozen_model(
     if module_blocks:
         disable_repeated_assignments(model, module_blocks)
 
+    ic_fallback = False
     if ic_mode == "target_volume":
-        ic_opts = ic_options or ICOptions(target_diameter_cm=2.0)
-        state, context = generate_initial_conditions(model, opts=ic_opts)
-        inject_output_aliases(context)
-    else:
+        ic_opts = ic_options or ICOptions(
+            target_diameter_cm=0.5,
+            max_days=150.0,
+            max_wall_seconds=20.0,
+            reset_policy="cancer_only",
+        )
+        try:
+            state, context = generate_initial_conditions(model, opts=ic_opts)
+            inject_output_aliases(context)
+        except ValueError as exc:
+            logger.warning("target_volume IC not available for snapshot '%s' (%s); falling back to snapshot IC", snapshot, exc)
+            ic_fallback = True
+    if ic_mode != "target_volume" or ic_fallback:
         state = model.initial_state().astype(float)
         model.apply_initial_assignments_to_state(state)
         context = None
@@ -503,19 +532,36 @@ def simulate_frozen_model(
     dose_index = 0
     pending_events: List[ScheduledEvent] = []
 
+    trigger_states: Dict[int, Dict[str, bool]] = {}
+
     def make_trigger_spec(entry: EventEntry) -> TriggerEventSpec:
-        def fn(t, y):
+        state = {"armed": True}
+
+        def fn(t: float, y: np.ndarray) -> float:
             vec = np.asarray(y, dtype=float)
             ctx = model.build_context_from_state(vec.copy())
             model.evaluate_repeated_assignments(ctx)
             model.apply_algebraic_rules(ctx, vec, mutate=False)
-            return entry.trigger_compiled.evaluate(ctx)
+            value = entry.trigger_compiled.evaluate(ctx)
+            if not state["armed"]:
+                if entry.direction > 0 and value < -_STATE_EVENT_HYSTERESIS:
+                    state["armed"] = True
+                elif entry.direction < 0 and value > _STATE_EVENT_HYSTERESIS:
+                    state["armed"] = True
+                elif entry.direction == 0 and abs(value) > _STATE_EVENT_HYSTERESIS:
+                    state["armed"] = True
+            if not state["armed"]:
+                if entry.direction >= 0:
+                    return max(value, _STATE_EVENT_HYSTERESIS)
+                return min(value, -_STATE_EVENT_HYSTERESIS)
+            return value
 
         fn.direction = entry.direction
         fn.terminal = False
-        return TriggerEventSpec(entry=entry, fn=fn)
+        return TriggerEventSpec(entry=entry, fn=fn, state=state)
 
     trigger_specs = [make_trigger_spec(entry) for entry in model.events]
+    initial_trigger_bools = [_evaluate_trigger_bool(entry, context) for entry in model.events]
     current_state = state
     context = reconcile(current_state)
 
@@ -596,6 +642,7 @@ def simulate_frozen_model(
         scheduled_doses=scheduled_list,
         pending_events=pending_events,
         trigger_specs=trigger_specs,
+        initial_trigger_bools=initial_trigger_bools,
         sample_times=sample_times,
         samples=samples,
         state=current_state,
@@ -611,6 +658,7 @@ def simulate_frozen_model(
         event_log=event_log,
         jac_sparsity=jac_pattern,
         record_state=record_state_annotation,
+        t0_options=t0_opts,
     )
 
     current_key = _tkey(current_time)
@@ -722,3 +770,8 @@ def simulate_frozen_model(
         provenance=provenance,
         semantics_version=SEMANTICS_VERSION,
     )
+def _evaluate_trigger_bool(entry: EventEntry, context: Dict[str, float]) -> bool:
+    if entry.trigger_boolean_compiled is not None:
+        return bool(entry.trigger_boolean_compiled.evaluate(context))
+    value = entry.trigger_compiled.evaluate(context)
+    return float(value) >= 0.0

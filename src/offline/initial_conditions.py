@@ -13,6 +13,8 @@ from scipy.integrate import solve_ivp
 from .aliases import inject_output_aliases
 from .segment_integrator import SolverConfig
 from .snapshot import FrozenModel
+import logging
+import time
 
 CM3_PER_LITRE = 1000.0  # 1 L = 1000 cm^3
 
@@ -53,6 +55,7 @@ class ICOptions:
     seed_species_id: str = "C1"
     seed_cells: float = 1.0
     max_days: float = 4000.0
+    max_wall_seconds: Optional[float] = None
     reset_policy: str = "cancer_only"  # {"all_zero","cancer_only","custom"}
     preserve_patterns: Tuple[str, ...] = ()
     solver: SolverConfig = field(
@@ -99,26 +102,73 @@ def generate_initial_conditions(model: FrozenModel, *, opts: ICOptions) -> Tuple
     diameter_event.direction = 1.0
     diameter_event.terminal = True
 
-    sol = solve_ivp(
-        fun=model.rhs,
-        t_span=(0.0, float(opts.max_days)),
-        y0=state0,
-        method=opts.solver.method,
-        rtol=opts.solver.rtol,
-        atol=opts.solver.atol,
-        max_step=opts.solver.max_step,
-        events=[diameter_event],
-        dense_output=False,
-    )
+    start_wall = time.monotonic()
+    last_logged = 0.0
+    current_state = state0
+    current_time = 0.0
+    prev_ctx = _reconcile_context(model, current_state.copy())
+    inject_output_aliases(prev_ctx)
+    prev_diam = _diameter_cm_from_volume_l(float(prev_ctx.get("V_T", 0.0)))
+    if prev_diam >= opts.target_diameter_cm:
+        return current_state.copy(), dict(prev_ctx)
 
-    if not sol.t_events or not sol.t_events[0].size:
-        last_ctx = _reconcile_context(model, sol.y[:, -1].copy())
-        raise RuntimeError(
-            f"Failed to reach target diameter {opts.target_diameter_cm} cm within {opts.max_days} days "
-            f"(last diameter = {_diameter_cm_from_volume_l(float(last_ctx.get('V_T', 0.0))):.3f} cm)"
+    while current_time < float(opts.max_days):
+        if opts.max_wall_seconds and (time.monotonic() - start_wall) > opts.max_wall_seconds:
+            raise RuntimeError(
+                f"Failed to reach target diameter {opts.target_diameter_cm} cm within wall-time {opts.max_wall_seconds}s"
+            )
+        span_end = min(float(opts.max_days), current_time + 5.0)
+        sol = solve_ivp(
+            fun=model.rhs,
+            t_span=(current_time, span_end),
+            y0=current_state,
+            method=opts.solver.method,
+            rtol=opts.solver.rtol,
+            atol=opts.solver.atol,
+            max_step=opts.solver.max_step,
+            events=[diameter_event],
+            dense_output=True,
         )
+        if not sol.success:
+            raise RuntimeError(f"IC integration failed at t={current_time}: {sol.message}")
+        prev_state = current_state
+        prev_time = current_time
+        current_state = np.asarray(sol.y[:, -1], dtype=float)
+        current_time = span_end
+        ctx = _reconcile_context(model, current_state.copy())
+        inject_output_aliases(ctx)
+        diam = _diameter_cm_from_volume_l(float(ctx.get("V_T", 0.0)))
+        if diam - last_logged >= 0.05 or current_time >= float(opts.max_days):
+            logging.getLogger(__name__).info(
+                "ic_progress t=%.1f d=%.3f/%.3f cm",
+                current_time,
+                diam,
+                opts.target_diameter_cm,
+            )
+            last_logged = diam
+        if sol.t_events and sol.t_events[0].size:
+            y_star = np.asarray(sol.y_events[0][-1], dtype=float)
+            ctx_star = _reconcile_context(model, y_star.copy())
+            inject_output_aliases(ctx_star)
+            return y_star, ctx_star
+        if prev_diam < opts.target_diameter_cm <= diam:
+            if sol.sol is not None:
+                t_lo, t_hi = prev_time, current_time
+                for _ in range(40):
+                    t_mid = 0.5 * (t_lo + t_hi)
+                    y_mid = np.asarray(sol.sol(t_mid), dtype=float)
+                    ctx_mid = _reconcile_context(model, y_mid.copy())
+                    inject_output_aliases(ctx_mid)
+                    diam_mid = _diameter_cm_from_volume_l(float(ctx_mid.get("V_T", 0.0)))
+                    if diam_mid >= opts.target_diameter_cm:
+                        return y_mid, ctx_mid
+                    t_lo = t_mid
+            return current_state.copy(), dict(ctx)
+        prev_diam = diam
 
-    y_star = np.asarray(sol.y_events[0][-1], dtype=float)
-    ctx_star = _reconcile_context(model, y_star.copy())
-    inject_output_aliases(ctx_star)
-    return y_star, ctx_star
+    final_ctx = _reconcile_context(model, current_state.copy())
+    inject_output_aliases(final_ctx)
+    raise RuntimeError(
+        f"Failed to reach target diameter {opts.target_diameter_cm} cm within {opts.max_days} days "
+        f"(last diameter = {_diameter_cm_from_volume_l(float(final_ctx.get('V_T', 0.0))):.3f} cm)"
+    )

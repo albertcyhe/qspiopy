@@ -18,10 +18,10 @@
   - Runner: `python -m scripts.validate_surrogate --scenarios A1 --dump-t0 --numeric-gates`  
   - Artefacts: `artifacts/validation/A1_*.csv` plus t₀ diagnostic tables inside the same directory.  
   - Result: ❌ fail — tumour_volume_l rel_L2 ≈ 1.42e‑1 / maxRE ≈ 1.92e‑1; pd1_occupancy rel_L2 = 1.0 / maxRE = 1.0; tcell_density_per_ul rel_L2 ≈ 7.86e‑1 / maxRE ≈ 7.99e‑1. Indicates the remaining deltas are now concentrated in tumour/occupancy biology rather than raw unit handling.
-- **Runtime plumbing upgrade (M3 partial)**  
-  - Changes: `simulate_frozen_model` now supports `ic_mode="target_volume"`, parameter overrides, repeated-assignment blocks, and alias injection; `scripts/validate_surrogate` exposes the new CLI flags (`--ic-mode`, `--ic-target-diam-cm`, `--ic-reset-policy`, `--param-override`, `--module-block`).  
-  - Tests: `pytest tests/test_alias_injection.py` (fast) and `pytest tests/test_initial_conditions.py -m slow` (explicit).  
-  - Status: ✅ features merged; target-volume IC currently fails to reach 2 cm for the example1 snapshot (max diameter ≈0.012 cm within 4000 days), so the A1 gate is still executed in `ic_mode="snapshot"` until the tumour-growth semantics are tuned.
+- **Runtime plumbing + 状态事件去抖（M3 部分）**  
+  - Changes: `simulate_frozen_model` 默认 `ic_mode="target_volume"`（0.5 cm、150 d、`reset_policy="cancer_only"`；不支持的快照自动回退至 snapshot 初值），并在 `segment_integrator` 中实现 state-trigger 事件的 armed/disarmed 去抖（不应期 + 回到 false 再触发 + ε‑bump）。`scripts/validate_surrogate` CLI 暴露 `--ic-mode/--ic-target-diam-cm/--ic-max-days/--ic-max-wall-seconds/...` 以保持 runner/CI 一致。  
+  - Tests: `pytest tests/test_alias_injection.py`、`pytest tests/test_initial_conditions.py -m slow`、`pytest tests/test_events.py -k event_suite`、`pytest tests/test_state_trigger_hysteresis.py`。  
+  - Status: ✅ 防抖语义已在轻量诊断场景通过；尚未回到 example2/A1 snapshot 模式做整体验证，因而 runner 仍以 target-volume IC 为默认，待 snapshot 路径验证后再切回。
 
 ## In Progress
 
