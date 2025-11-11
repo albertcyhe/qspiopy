@@ -246,11 +246,19 @@ def convert_parameter_value(value: float, unit: str) -> float:
         return amount
     if norm.startswith("molecule/") or norm.startswith("molecules/"):
         _, denom = norm.split("/", 1)
+        if denom in {"micrometer^2", "micrometre^2", "micrometer^3", "micrometre^3"}:
+            return float(value)
         return float(value) / _convert_denominator(denom)
     if norm.startswith("1/") and norm[2:] in _VOLUME_FACTORS:
         return float(value) / convert_volume(1.0, norm[2:])
     if norm.startswith("1/(second"):
-        return rate_to_per_day(value, "1/second")
+        remainder = norm[len("1/(second") :]
+        converted = rate_to_per_day(value, "1/second")
+        remainder = remainder.strip().lstrip("*")
+        remainder = remainder.rstrip(")")
+        if remainder:
+            converted /= _convert_denominator(remainder)
+        return converted
     if norm in {"cell/milliliter", "cells/milliliter"}:
         return float(value) * 1000.0
     if norm in {"cell/liter", "cells/liter"}:
