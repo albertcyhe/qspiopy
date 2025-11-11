@@ -169,10 +169,12 @@ def convert_kon(value: float, unit: str) -> float:
         return float(value) * DAY_PER_SECOND
     if norm in {
         "1/(micromolarity*nanometer*second)",
-        "1/(um*nm*second)",
         "1/(micromolarity*nm*second)",
+        "1/(um*nanometer*second)",
+        "1/(um*nm*second)",
+        "1/(um*nm*s)",
     }:
-        return float(value) * 9.8412890625
+        return float(value) * (DAY_PER_SECOND * 1e-3)
     if norm in {"1/(micromolarity*second)", "1/(um*second)"}:
         return float(value) * DAY_PER_SECOND * 1e6
     return float(value)
@@ -246,11 +248,19 @@ def convert_parameter_value(value: float, unit: str) -> float:
         return amount
     if norm.startswith("molecule/") or norm.startswith("molecules/"):
         _, denom = norm.split("/", 1)
+        if denom in {"micrometer^2", "micrometre^2", "micrometer^3", "micrometre^3"}:
+            return float(value)
         return float(value) / _convert_denominator(denom)
     if norm.startswith("1/") and norm[2:] in _VOLUME_FACTORS:
         return float(value) / convert_volume(1.0, norm[2:])
     if norm.startswith("1/(second"):
-        return rate_to_per_day(value, "1/second")
+        remainder = norm[len("1/(second") :]
+        converted = rate_to_per_day(value, "1/second")
+        remainder = remainder.strip().lstrip("*")
+        remainder = remainder.rstrip(")")
+        if remainder:
+            converted /= _convert_denominator(remainder)
+        return converted
     if norm in {"cell/milliliter", "cells/milliliter"}:
         return float(value) * 1000.0
     if norm in {"cell/liter", "cells/liter"}:
@@ -336,21 +346,22 @@ def convert_area(value: float, unit: str) -> float:
 
 
 def _looks_like_concentration(units: str, dimension: Optional[str]) -> bool:
+    """Return True when a species behaves like a concentration variable."""
+
+    unit_norm = _normalize(units) if units else ""
+    if unit_norm:
+        if "molar" in unit_norm or "mol/" in unit_norm or "mole/" in unit_norm:
+            return True
+        if "/l" in unit_norm or "/liter" in unit_norm or "/litre" in unit_norm:
+            return True
+        if "/" in unit_norm:
+            return True
+
     dim_norm = _normalize(dimension) if dimension else ""
     if dim_norm:
         if any(token in dim_norm for token in ("concentration", "amount/vol", "mass/vol", "mol/vol")):
             return True
-        if dim_norm in {"amount", "substance", "mass"}:
-            return False
-    unit_norm = _normalize(units)
-    if not unit_norm:
-        return False
-    if "molar" in unit_norm or "mol/" in unit_norm or "mole/" in unit_norm:
-        return True
-    if "/l" in unit_norm or "/liter" in unit_norm or "/litre" in unit_norm:
-        return True
-    if "/" in unit_norm:
-        return True
+
     return False
 
 

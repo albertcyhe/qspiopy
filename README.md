@@ -50,7 +50,7 @@ Requirements: Python 3.10+, NumPy, SciPy, Pandas, SymPy, Matplotlib, PyTest, Pyd
 
 ```bash
 python -m pip install -U pip
-python -m pip install numpy scipy pandas sympy matplotlib pytest pydantic
+python -m pip install -r requirements-dev.txt
 ```
 
 Quick start
@@ -221,7 +221,7 @@ Interfaces (Inputs / Outputs)
 -----------------------------
 
 Python API
-- `simulate_frozen_model(snapshot, *, days, therapy, sample_interval_hours, seed=None, emit_diagnostics=False, run_label=None, event_log=None, rtol_override=None, atol_override=None) -> ScenarioResult`
+- `simulate_frozen_model(snapshot, *, days, therapy, sample_interval_hours, seed=None, emit_diagnostics=False, run_label=None, event_log=None, rtol_override=None, atol_override=None, capture_contexts=False) -> ScenarioResult`
   - Inputs:
     - `snapshot` (str): name under `artifacts/matlab_frozen_model/` (e.g. `example1`, `event_suite`).
     - `days` (float): simulation horizon in `configset.TimeUnits` (days by default).
@@ -233,6 +233,7 @@ Python API
   - Output: `ScenarioResult` with arrays
     - `time_days`, `cancer_cells`, `dead_cells`, `t_cells`, `tumour_volume_l`, `tumour_diameter_cm`, `pd1_occupancy`, `tcell_density_per_ul`.
     - `ScenarioResult.to_frame()` returns a DataFrame with the same columns.
+    - When `capture_contexts=True`, `ScenarioResult.raw_states` contains the sampled solver state vectors and `ScenarioResult.raw_contexts` contains the reconciled context dictionaries for each sample (useful for debugging flat trajectories).
   - Event log entry (when `event_log` is provided):
     - `{ "event_index": int, "time_fire": float, "time_trigger": float, "delay": float, "type": "immediate"|"delayed", "assignments": "Target=Expr; …" }`.
 
