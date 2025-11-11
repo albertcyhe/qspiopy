@@ -50,7 +50,7 @@ Requirements: Python 3.10+, NumPy, SciPy, Pandas, SymPy, Matplotlib, PyTest, Pyd
 
 ```bash
 python -m pip install -U pip
-python -m pip install numpy scipy pandas sympy matplotlib pytest pydantic
+python -m pip install -r requirements-dev.txt
 ```
 
 Quick start

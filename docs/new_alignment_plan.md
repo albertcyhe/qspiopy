@@ -8,23 +8,29 @@
 | --- | --- | --- |
 | **M1 事件语义** | 状态触发 + 同刻顺序 + pre/post 双记录 + ε‑bump + first_step + 事件后 reconcile | ✅ 已实现：schedule 清洁、聚合同刻剂量、延迟事件队列、trigger specs、metadata (`phase_code` 等) |
 | **M2 单位与参数** | `units.py` 统一换算（时间/体积/浓度/速率/剂量），参数派生 | ✅ 已完成：所有时间/体积/流量/kon/koff 路径统一到 day/L/M；`normalise_dose_to_species()` 驱动 `apply_dose()`；ParameterGraph 派生值写入 `unit_normalisation_map` 并可由 `scripts/print_units_table.py` 审计；新增 `tests/test_units.py`、`tests/test_param_graph.py`。**遗留风险**：2D kon 仍依赖 legacy 常数（待几何参数化）；快照若缺药物 MW 则会在 mg 剂量路径上硬 fail；A1 数值门虽然跑通流程但 tumour/occupancy/tcell_density 仍 ❌（语义问题挪至 M3/M4 解决）。 |
-| **M3 初始化与模块化** | 目标体积初始条件、模块化加载 | 🟡 进行中：`simulate_frozen_model` 默认 `ic_mode="target_volume"`（0.5 cm、150 d、`reset_policy="cancer_only"`；不支持的快照自动退回 snapshot 初值），CLI 暴露 `--ic-mode/--ic-target-diam-cm/--ic-max-days/--ic-max-wall-seconds`；state-trigger 事件已加入去抖/迟滞状态机，并配套 `tests/test_state_trigger_hysteresis.py` 与 `tests/test_events.py -k event_suite` 覆盖。**最新进展**：在 `segment_integrator` 中落地了 “kick + warm-start quarantine” 逻辑（先外显推离 t≈0，再用 Radau/BDF 补齐并带墙钟/重试护栏），`example2` 的 `ic_mode="snapshot"` 现已可以稳定返回；下一步是用同样配置复测 A1 并评估数值门，然后再决定是否把 snapshot 路径设回默认。 |
+| **M3 初始化与模块化** | 目标体积初始条件、模块化加载 | 🟡 进行中：`simulate_frozen_model` 默认 `ic_mode="target_volume"`（0.5 cm、150 d、`reset_policy="cancer_only"`；不支持的快照自动退回 snapshot 初值），CLI 暴露 `--ic-mode/--ic-target-diam-cm/--ic-max-days/--ic-max-wall-seconds`；state-trigger 事件已加入去抖/迟滞状态机，并配套 `tests/test_state_trigger_hysteresis.py` 与 `tests/test_events.py -k event_suite` 覆盖。**最新进展**：运行期 module block 已绑定到 repeated assignment 链路（`pd1_bridge_block`、`tumour_geometry_block` 自动随 `evaluate_repeated_assignments` 运行），分段积分器新增 warm-start 失败回退与采样时间播种，并配套 `tests/test_module_blocks.py`、`tests/test_simulation_sampling.py` 保障采样完整性。当前 snapshot 路径数值门仍未绿，需继续梳理派生量语义后再考虑把 snapshot 模式设回默认。 |
 | **M4 多克隆与动态体积** | 体积/伪进展输出 & 克隆竞争 | ⏳ 未开始 |
 | **M5 验收/CI** | 组件测试 + 数值门绿灯 + CI | ⏳ 进行中（validate_surrogate 现已稳定，但 A1 数值门仍未过） |
 
 - [x] `validate_surrogate` 默认关闭性能基准（`--benchmark-replicates=0`）。
 - [ ] 数值门：A1 仍超标（tumour_volume/pd1_occupancy/tcell_density；PK 尾部），待完成 M3/M4 语义梳理后重跑 `--numeric-gates`。
 
-**最新实测（2025-11-07）**
+**最新实测（2025-11-09）**
 
-- MATLAB 参考已用 `/Volumes/AlbertSSD/Applications/MATLAB_R2023b.app/bin/matlab` 重新生成（`python -m scripts.run_alignment_suite --scenarios A1 --output artifacts/validation`）。
-- `python -m scripts.validate_surrogate --scenarios A1 --dump-t0 --numeric-gates`：当前仍以 `ic_mode=snapshot` 运行以便直接对照 frozen snapshot（默认 CLI 已改为 `ic_mode=target_volume`；snapshot 路径需等迟滞补完后再启用），tumour_volume_l rel_L2≈1.4e-1、pd1_occupancy rel_L2=1.0、tcell_density rel_L2≈0.79。待状态触发事件的迟滞语义在轻量诊断场景验证通过后，再用 `--ic-mode snapshot` 复测；在此之前，验证/runner 默认使用 `--ic-mode target_volume --ic-target-diam-cm 0.5 --ic-max-days 150 --ic-reset-policy cancer_only`。
+- MATLAB 参考仍由 `/Volumes/AlbertSSD/Applications/MATLAB_R2023b.app/bin/matlab` 生成（`python -m scripts.run_alignment_suite --scenarios A1 --output artifacts/validation`）。
+- `python -m scripts.validate_surrogate --scenarios A1 --ic-mode snapshot --numeric-gates`：暖启动与采样稳定性已确认，但数值门依旧未绿，`tumour_volume_l` rel_L2≈1.42e-1 / maxRE≈1.92e-1，`pd1_occupancy` rel_L2=1 / maxRE=1，`tcell_density_per_ul` rel_L2≈7.86e-1 / maxRE≈7.99e-1，并在日志中提示 `[n] dimension mismatch: mole vs molarity`。修复前，验证 runner 仍以 `--ic-mode target_volume --ic-target-diam-cm 0.5 --ic-max-days 150 --ic-reset-policy cancer_only` 为默认配置。
 
 **M3 剩余重点**
 
-1. 状态触发事件迟滞/防抖：触发一次后必须“退回安全区”再触发（包含 ε‑bump、armed state、时间抑制窗）。
-2. 轻量诊断场景：构造最小 ODE + 状态事件测试，确保迟滞逻辑不会在 t≈0 重复触发。
-3. Snapshot IC 复用：上述两项完成后，再把 `ic_mode=snapshot` 作为默认，并重新跑 A/B 系列。
+1. **PD-1 桥接单位一致性**：梳理 `aPD1` 及下游占有率方程的单位（amount vs concentration），补齐 compartment 体积或转换因子，解决日志中的 `mole vs molarity` 告警，并推动 `pd1_occupancy` 数值门过关。
+2. **肿瘤体积派生链路复核**：确认 `tumour_volume_l`、`tumour_diameter_cm` 与 `tcell_density_per_ul` 的推导同 MATLAB 快照一致，必要时在 module block 或 alias 中补充几何换算、死亡细胞贡献与体积回填。
+3. **Snapshot 默认化决策**：待上述语义问题解决并通过 A1 数值门后，再评估将 `ic_mode=snapshot` 恢复为默认路径并扩展到 A/B 系列场景。
+
+**下一步计划（M3 收尾）**
+
+1. 定位 `pd1_bridge_block` 与相关 repeated assignment 的单位差异，补写转换逻辑与针对性的单元测试。
+2. 对照 MATLAB 快照的 `tcell_density_per_ul` 计算链，确认 Python 端的体积/细胞数数据流，必要时补充 `tumour_geometry_block` 或 `aliases` 逻辑，并新增回归用例。
+3. 重跑 `python -m scripts.validate_surrogate --scenarios A1 --ic-mode snapshot --numeric-gates` 验证修复效果，更新文档并决定是否切换默认初始化模式。
 
 ---
 

@@ -557,17 +557,18 @@ def run_segmented_integration(
 ) -> Tuple[np.ndarray, Dict[str, float], float, int]:
     """Integrate between discontinuities while replaying events/doses."""
 
-    segment_points = sorted(
-        {
-            start_time,
-            stop_time,
-            *[
-                min(stop_time, scheduled_dose.time)
-                for scheduled_dose in scheduled_doses
-                if scheduled_dose.time <= stop_time + tol_time
-            ],
-        }
-    )
+    segment_points = {
+        start_time,
+        stop_time,
+        *[
+            min(stop_time, scheduled_dose.time)
+            for scheduled_dose in scheduled_doses
+            if scheduled_dose.time <= stop_time + tol_time
+        ],
+    }
+    if sample_times.size:
+        segment_points.update(float(min(stop_time, max(start_time, value))) for value in sample_times)
+    segment_points = sorted(segment_points)
     options = t0_options or T0Options()
     current_time = start_time
     segment_index = 0
@@ -823,6 +824,9 @@ def run_segmented_integration(
             tol_time=tol_time,
             diagnostics=diagnostics,
         )
+        samples[time_key(current_time)] = state.copy()
+        if diagnostics:
+            logger.info("record_sample t=%.6g", current_time)
         if pending_triggered:
             limit_first_step = True
             limit_max_step = True

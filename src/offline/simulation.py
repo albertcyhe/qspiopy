@@ -8,7 +8,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Protocol
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Protocol
 
 import numpy as np
 import pandas as pd
@@ -18,7 +18,12 @@ from .aliases import inject_output_aliases
 from .entities import BASE_HEADER, DoseEntry, EventEntry, ScenarioResult, ScheduledDose, SEMANTICS_VERSION
 from .errors import AlignmentFail, ConfigError, NumericsError, SnapshotError
 from .initial_conditions import ICOptions, generate_initial_conditions
-from .modules import apply_parameter_overrides, disable_repeated_assignments
+from .modules import (
+    apply_parameter_overrides,
+    bind_module_blocks,
+    disable_repeated_assignments,
+    resolve_module_blocks,
+)
 from .snapshot import FrozenModel, load_frozen_model
 from .units import convert_amount
 from .segment_integrator import (
@@ -402,6 +407,7 @@ def simulate_frozen_model(
     ic_mode: str = "target_volume",
     ic_options: Optional[ICOptions] = None,
     t0_options: Optional[T0Options] = None,
+    _disable_warm_start: bool = False,
     param_overrides: Optional[Dict[str, float]] = None,
     module_blocks: Optional[Sequence[str]] = None,
 ) -> ScenarioResult:
@@ -460,8 +466,21 @@ def simulate_frozen_model(
 
     if param_overrides:
         apply_parameter_overrides(model, dict(param_overrides))
-    if module_blocks:
-        disable_repeated_assignments(model, module_blocks)
+
+    if module_blocks is None:
+        block_names: Tuple[str, ...] = ("tumour_geometry", "pd1_bridge")
+    else:
+        block_names = tuple(module_blocks)
+    pre_blocks, post_blocks, disable_from_blocks, active_block_names = resolve_module_blocks(
+        model, block_names
+    )
+    if pre_blocks or post_blocks:
+        bind_module_blocks(model, pre_blocks, post_blocks)
+    disable_targets = tuple(dict.fromkeys(disable_from_blocks))
+    if disable_targets:
+        disable_repeated_assignments(model, disable_targets)
+    if active_block_names:
+        logger.info("module_blocks active=%s", ",".join(active_block_names))
 
     ic_fallback = False
     if ic_mode == "target_volume":
@@ -489,7 +508,7 @@ def simulate_frozen_model(
     sample_times = _merge_close_times(sample_times)
     tol_time = _TIME_TOL
 
-    def reconcile(vec: np.ndarray, time_point: Optional[float] = None) -> Dict[str, float]:
+    def _reconcile_mutating(vec: np.ndarray, time_point: Optional[float] = None) -> Dict[str, float]:
         ctx = model.build_context_from_state(vec.copy())
         if time_point is not None:
             t_val = float(time_point)
@@ -502,7 +521,19 @@ def simulate_frozen_model(
         inject_output_aliases(ctx)
         return ctx
 
-    context = context or reconcile(state, time_point=0.0)
+    def _reconcile_readonly(vec: np.ndarray, time_point: Optional[float] = None) -> Dict[str, float]:
+        ctx = model.build_context_from_state(vec.copy())
+        if time_point is not None:
+            t_val = float(time_point)
+            ctx["time"] = t_val
+            ctx["time_days"] = t_val
+            ctx["t"] = t_val
+        model.evaluate_repeated_assignments(ctx)
+        model.apply_algebraic_rules(ctx, vec, mutate=False)
+        inject_output_aliases(ctx)
+        return ctx
+
+    context = _reconcile_mutating(state, time_point=0.0)
     _perform_t0_quick_check(model, state, context)
 
     samples: Dict[float, np.ndarray] = {}
@@ -535,6 +566,8 @@ def simulate_frozen_model(
         scheduled_list.extend(filtered)
 
     scheduled_list.sort(key=lambda item: (item.time, item.priority))
+    if emit_diagnostics:
+        logger.info("scheduled_doses=%d", len(scheduled_list))
     dose_index = 0
     pending_events: List[ScheduledEvent] = []
     current_state = state
@@ -611,7 +644,7 @@ def simulate_frozen_model(
     while dose_index < len(scheduled_list) and abs(scheduled_list[dose_index].time) <= tol_time:
         scheduled_dose = scheduled_list[dose_index]
         audit_info = model.apply_dose(scheduled_dose.dose, scheduled_dose.amount, context, current_state)
-        context = reconcile(current_state, time_point=0.0)
+        context = _reconcile_mutating(current_state, time_point=0.0)
         samples[_tkey(0.0)] = current_state.copy()
         record_dose_audit(0.0, scheduled_dose, audit_info)
         logger.info(
@@ -625,22 +658,27 @@ def simulate_frozen_model(
     jac_pattern = model.jacobian_sparsity()
 
     current_state = state
-    warm_state, context, start_time = warm_start_quarantine(
-        model=model,
-        solver_config=solver_config,
-        state=current_state,
-        context=context,
-        reconcile=reconcile,
-        samples=samples,
-        time_key=_tkey,
-        pending_events=pending_events,
-        t0_options=t0_opts,
-        jac_sparsity=jac_pattern,
-        tol_time=tol_time,
-        diagnostics=emit_diagnostics,
-    )
-    current_state = warm_state
-    samples.setdefault(_tkey(start_time), current_state.copy())
+    if not _disable_warm_start:
+        warm_state, context, start_time = warm_start_quarantine(
+            model=model,
+            solver_config=solver_config,
+            state=current_state,
+            context=context,
+            reconcile=_reconcile_mutating,
+            samples=samples,
+            time_key=_tkey,
+            pending_events=pending_events,
+            t0_options=t0_opts,
+            jac_sparsity=jac_pattern,
+            tol_time=tol_time,
+            diagnostics=emit_diagnostics,
+        )
+        current_state = warm_state
+        samples.setdefault(_tkey(start_time), current_state.copy())
+    else:
+        start_time = 0.0
+        samples.setdefault(_tkey(start_time), current_state.copy())
+        context = _reconcile_mutating(current_state, time_point=start_time)
     initial_trigger_bools = [_evaluate_trigger_bool(entry, context) for entry in model.events]
 
     current_state, context, current_time, dose_index = run_segmented_integration(
@@ -660,7 +698,7 @@ def simulate_frozen_model(
         tol_time=tol_time,
         record_solution_samples=_record_solution_samples,
         record_dose_audit=record_dose_audit,
-        reconcile=reconcile,
+        reconcile=_reconcile_mutating,
         time_key=_tkey,
         event_log=event_log,
         jac_sparsity=jac_pattern,
@@ -668,6 +706,55 @@ def simulate_frozen_model(
         t0_options=t0_opts,
         diagnostics=emit_diagnostics,
     )
+
+    sample_key_set = {_tkey(value) for value in sample_times}
+    recorded_keys = sample_key_set.intersection(samples.keys())
+    expected_count = len(sample_key_set)
+    recorded_count = len(recorded_keys)
+    if expected_count:
+        min_required = min(expected_count, max(5, int(0.8 * expected_count)))
+    else:
+        min_required = 0
+    if emit_diagnostics and expected_count:
+        missing_keys = sorted(sample_key_set.difference(samples.keys()))
+        sample_preview = sorted(samples.keys())[:5]
+        logger.warning(
+            "sample_capture expected=%d recorded=%d missing_first=%s have_first=%s",
+            expected_count,
+            recorded_count,
+            missing_keys[:5],
+            sample_preview,
+        )
+
+    if not _disable_warm_start and expected_count and recorded_count < min_required:
+        logger.warning(
+            "warm-start captured %d/%d sample states; retrying without warm-start",
+            recorded_count,
+            expected_count,
+        )
+        return simulate_frozen_model(
+            snapshot,
+            days=days,
+            therapy=therapy,
+            rtol_override=rtol_override,
+            atol_override=atol_override,
+            seed=seed,
+            sample_interval_hours=sample_interval_hours,
+            run_label=run_label,
+            scheduler=scheduler,
+            custom_doses=custom_doses,
+            extra_outputs=extra_outputs,
+            event_log=event_log,
+            dose_audit=dose_audit,
+            context_outputs=context_outputs,
+            ic_mode=ic_mode,
+            ic_options=ic_options,
+            t0_options=t0_options,
+            param_overrides=param_overrides,
+            module_blocks=module_blocks,
+            emit_diagnostics=emit_diagnostics,
+            _disable_warm_start=True,
+        )
 
     current_key = _tkey(current_time)
     if current_key not in samples:
@@ -691,24 +778,27 @@ def simulate_frozen_model(
     tcell_density = []
     contexts: List[Dict[str, float]] = []
 
-    for vector in states:
+    for time_val, vector in zip(sample_times, states):
         vec = vector.copy()
-        ctx = model.build_context_from_state(vec)
-        model.evaluate_repeated_assignments(ctx)
-        model.apply_algebraic_rules(ctx, vec, mutate=False)
-        model.sync_state_from_context(ctx, vec)
-        inject_output_aliases(ctx)
+        ctx = _reconcile_readonly(vec, time_point=time_val)
         contexts.append(dict(ctx))
 
-        c_cells = ctx.get("C1", 0.0)
-        d_cells = ctx.get("C_x", 0.0)
-        t_tumour = ctx.get("V_T.T1", 0.0)
-        tumour_t0 = ctx.get("V_T.T0", 0.0)
-        volume_l = ctx.get("V_T", 0.0)
-        diameter_cm = ((3.0 * volume_l * 1e3) / (4.0 * math.pi)) ** (1.0 / 3.0) * 2.0 if volume_l > 0 else 0.0
-        occupancy = ctx.get("H_PD1_C1", 0.0)
-        density = t_tumour / max(volume_l * 1e6, 1e-12)
-        t_total = ctx.get("T_total", t_tumour + tumour_t0)
+        c_cells = float(ctx.get("C1", 0.0))
+        d_cells = float(ctx.get("C_x", 0.0))
+        t_tumour = float(ctx.get("V_T.T1", 0.0))
+        tumour_t0 = float(ctx.get("V_T.T0", 0.0))
+        volume_l = float(ctx.get("tumour_volume_l", ctx.get("V_T", 0.0)))
+        diameter_cm = float(
+            ctx.get(
+                "tumour_diameter_cm",
+                ((3.0 * volume_l * 1e3) / (4.0 * math.pi)) ** (1.0 / 3.0) * 2.0 if volume_l > 0.0 else 0.0,
+            )
+        )
+        occupancy = float(ctx.get("pd1_occupancy", ctx.get("H_PD1_C1", 0.0)))
+        density = float(ctx.get("tcell_density_per_ul", 0.0))
+        if not density and volume_l > 0.0:
+            density = t_tumour / max(volume_l * 1e6, 1e-12)
+        t_total = float(ctx.get("T_total", t_tumour + tumour_t0))
 
         cancer_cells.append(c_cells)
         dead_cells.append(d_cells)
@@ -717,6 +807,7 @@ def simulate_frozen_model(
         tumour_diameter_cm.append(diameter_cm)
         pd1_occupancy.append(occupancy)
         tcell_density.append(density)
+
 
     extras_results: Dict[str, np.ndarray] = {}
     base_extras = [

@@ -33,3 +33,17 @@ def test_normalise_dose_to_species_handles_concentration_targets() -> None:
     expected_moles = 0.2 / 1.436e5
     assert amount_mol == pytest.approx(expected_moles)
     assert delta == pytest.approx(expected_moles / 5.0)
+
+
+def test_normalise_dose_to_species_prefers_units_over_dimension() -> None:
+    delta, amount_mol = normalise_dose_to_species(
+        amount=200.0,
+        amount_unit="milligram",
+        species_units="molarity",
+        species_dimension="amount",
+        compartment_volume_l=5.0,
+        molecular_weight_g_per_mol=1.436e5,
+    )
+    expected_moles = 0.2 / 1.436e5
+    assert delta == pytest.approx(expected_moles / 5.0)
+    assert amount_mol == pytest.approx(expected_moles)

@@ -336,21 +336,22 @@ def convert_area(value: float, unit: str) -> float:
 
 
 def _looks_like_concentration(units: str, dimension: Optional[str]) -> bool:
+    """Return True when a species behaves like a concentration variable."""
+
+    unit_norm = _normalize(units) if units else ""
+    if unit_norm:
+        if "molar" in unit_norm or "mol/" in unit_norm or "mole/" in unit_norm:
+            return True
+        if "/l" in unit_norm or "/liter" in unit_norm or "/litre" in unit_norm:
+            return True
+        if "/" in unit_norm:
+            return True
+
     dim_norm = _normalize(dimension) if dimension else ""
     if dim_norm:
         if any(token in dim_norm for token in ("concentration", "amount/vol", "mass/vol", "mol/vol")):
             return True
-        if dim_norm in {"amount", "substance", "mass"}:
-            return False
-    unit_norm = _normalize(units)
-    if not unit_norm:
-        return False
-    if "molar" in unit_norm or "mol/" in unit_norm or "mole/" in unit_norm:
-        return True
-    if "/l" in unit_norm or "/liter" in unit_norm or "/litre" in unit_norm:
-        return True
-    if "/" in unit_norm:
-        return True
+
     return False
 
 

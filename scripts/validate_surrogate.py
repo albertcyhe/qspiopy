@@ -31,6 +31,7 @@ class Scenario:
     sample_interval_hours: Optional[float] = None
     custom_doses: Optional[Tuple] = None
     context_outputs: Optional[Dict[str, str]] = None
+    module_blocks: Tuple[str, ...] = tuple()
 
 
 SCENARIO_REGISTRY: Dict[str, Scenario] = {
@@ -45,12 +46,14 @@ SCENARIO_REGISTRY: Dict[str, Scenario] = {
         (Path("parameters/example1_parameters.json"),),
         "anti_pd1",
         snapshot="example1",
+        module_blocks=("pd1_bridge_block", "tumour_geometry_block"),
     ),
     "example2_treated": Scenario(
         "example2_treated",
         (Path("parameters/example2_parameters.json"),),
         "anti_pd1",
         snapshot="example2",
+        module_blocks=("pd1_bridge_block", "tumour_geometry_block"),
     ),
     "event_suite": Scenario(
         "event_suite",
@@ -74,6 +77,7 @@ SCENARIO_REGISTRY["A1"] = Scenario(
     sample_interval_hours=A1_SPEC.sample_interval_hours,
     custom_doses=A1_DOSES,
     context_outputs=dict(A1_SPEC.context_outputs),
+    module_blocks=("pd1_bridge_block", "tumour_geometry_block"),
 )
 SCENARIO_REGISTRY[MICRO_SPEC.name] = Scenario(
     MICRO_SPEC.name,
@@ -84,6 +88,7 @@ SCENARIO_REGISTRY[MICRO_SPEC.name] = Scenario(
     sample_interval_hours=MICRO_SPEC.sample_interval_hours,
     custom_doses=MICRO_DOSES,
     context_outputs=dict(MICRO_SPEC.context_outputs),
+    module_blocks=("pd1_bridge_block", "tumour_geometry_block"),
 )
 
 
@@ -240,8 +245,15 @@ def _run_scenario(
     simulate_kwargs["ic_mode"] = ic_mode
     if ic_mode == "target_volume":
         simulate_kwargs["ic_options"] = ic_options
+    combined_blocks: List[str] = []
+    if scenario.module_blocks:
+        combined_blocks.extend(scenario.module_blocks)
     if module_blocks:
-        simulate_kwargs["module_blocks"] = list(module_blocks)
+        combined_blocks.extend(module_blocks)
+    if combined_blocks:
+        ordered = list(dict.fromkeys(block.strip() for block in combined_blocks if block))
+        if ordered:
+            simulate_kwargs["module_blocks"] = ordered
     if param_overrides:
         simulate_kwargs["param_overrides"] = dict(param_overrides)
     result = simulate_frozen_model(
@@ -506,7 +518,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         "--module-block",
         action="append",
         default=[],
-        help="Repeated-assignment targets to disable before simulation",
+        help=(
+            "Module block names to activate and/or repeated-assignment targets to disable "
+            "before simulation"
+        ),
     )
     parser.add_argument(
         "--param-override",
