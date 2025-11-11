@@ -410,6 +410,7 @@ def simulate_frozen_model(
     _disable_warm_start: bool = False,
     param_overrides: Optional[Dict[str, float]] = None,
     module_blocks: Optional[Sequence[str]] = None,
+    capture_contexts: bool = False,
 ) -> ScenarioResult:
     try:
         model = load_frozen_model(snapshot)
@@ -808,6 +809,8 @@ def simulate_frozen_model(
         pd1_occupancy.append(occupancy)
         tcell_density.append(density)
 
+    raw_contexts_tuple: Tuple[Dict[str, float], ...] = tuple(contexts) if capture_contexts else tuple()
+    raw_states = states.copy() if capture_contexts else None
 
     extras_results: Dict[str, np.ndarray] = {}
     base_extras = [
@@ -868,6 +871,8 @@ def simulate_frozen_model(
         header=header,
         provenance=provenance,
         semantics_version=SEMANTICS_VERSION,
+        raw_states=raw_states,
+        raw_contexts=raw_contexts_tuple,
     )
 def _evaluate_trigger_bool(entry: EventEntry, context: Dict[str, float]) -> bool:
     if entry.trigger_boolean_compiled is not None:

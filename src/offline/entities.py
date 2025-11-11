@@ -40,6 +40,8 @@ class ScenarioResult:
     semantics_version: str = SEMANTICS_VERSION
     header: Tuple[str, ...] = field(default_factory=tuple)
     provenance: Dict[str, str] = field(default_factory=dict)
+    raw_states: Optional[np.ndarray] = None
+    raw_contexts: Tuple[Dict[str, float], ...] = field(default_factory=tuple)
 
     def column_order(self) -> Tuple[str, ...]:
         if self.header:

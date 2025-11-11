@@ -18,6 +18,7 @@ import pandas as pd
 from scripts.compare_audits import compare_doses, compare_events
 from scripts.scenario_registry import a_series, doses_to_entries, microdose
 from src.offline.initial_conditions import ICOptions
+from src.offline.entities import ScenarioResult
 from src.offline.frozen_model import EVENT_LOG_FIELDS, load_frozen_model, simulate_frozen_model
 
 
@@ -184,6 +185,56 @@ def _compute_metrics(
     }
 
 
+def _dump_flat_debug(scenario_name: str, result: ScenarioResult, limit: int) -> None:
+    if limit <= 0:
+        return
+    contexts = result.raw_contexts
+    if not contexts:
+        print(
+            f"[flat-debug] scenario={scenario_name} capture_contexts disabled; rerun with --dump-flat-debug"
+        )
+        return
+    span_metrics = {
+        "tumour_volume_l": float(np.max(result.tumour_volume_l) - np.min(result.tumour_volume_l)),
+        "pd1_occupancy": float(np.max(result.pd1_occupancy) - np.min(result.pd1_occupancy)),
+        "tcell_density_per_ul": float(
+            np.max(result.tcell_density_per_ul) - np.min(result.tcell_density_per_ul)
+        ),
+    }
+    span_text = ", ".join(f"{key} span={value:.3e}" for key, value in span_metrics.items())
+    print(f"[flat-debug] scenario={scenario_name} {span_text}")
+
+    rows: List[Dict[str, float]] = []
+    limit = min(limit, len(result.time_days))
+    keys = [
+        ("C1", "C1"),
+        ("C_x", "C_x"),
+        ("T_tumour", "V_T.T1"),
+        ("V_C.nivo", "V_C.nivolumab"),
+        ("V_T.nivo", "V_T.nivolumab"),
+        ("aPD1", "aPD1"),
+        ("H_PD1_C1", "H_PD1_C1"),
+        ("pd1_occupancy_ctx", "pd1_occupancy"),
+        ("tumour_volume_ctx", "tumour_volume_l"),
+        ("V_T_ctx", "V_T"),
+        ("tcell_density_ctx", "tcell_density_per_ul"),
+    ]
+    for idx in range(limit):
+        ctx = contexts[idx]
+        row: Dict[str, float] = {"time_days": float(result.time_days[idx])}
+        for column, key in keys:
+            value = ctx.get(key)
+            if value is None and key == "pd1_occupancy":
+                value = ctx.get("H_PD1_C1")
+            if value is None and key == "tumour_volume_l":
+                value = ctx.get("V_T")
+            row[column] = float(value) if value is not None else float("nan")
+        rows.append(row)
+    frame = pd.DataFrame(rows)
+    with pd.option_context("display.max_columns", None, "display.width", 160):
+        print(frame.to_string(index=False, float_format=lambda x: f"{x: .6g}"))
+
+
 def _tgi(volume_control: pd.DataFrame, volume_treated: pd.DataFrame, column: str) -> float:
     ctrl = volume_control.iloc[-1][column]
     trt = volume_treated.iloc[-1][column]
@@ -204,7 +255,16 @@ def _run_scenario(
     ic_options: ICOptions,
     module_blocks: Sequence[str],
     param_overrides: Dict[str, float],
-) -> Tuple[Dict[str, Path], pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    capture_contexts: bool,
+) -> Tuple[
+    Dict[str, Path],
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    Dict[str, object],
+    Dict[str, float],
+    ScenarioResult,
+]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     reference_path = output_dir / f"{scenario.name}_reference.csv"
@@ -256,6 +316,8 @@ def _run_scenario(
             simulate_kwargs["module_blocks"] = ordered
     if param_overrides:
         simulate_kwargs["param_overrides"] = dict(param_overrides)
+    if capture_contexts:
+        simulate_kwargs["capture_contexts"] = True
     result = simulate_frozen_model(
         scenario.snapshot,
         days=scenario.stop_time,
@@ -357,6 +419,7 @@ def _run_scenario(
         events_df,
         grid_meta,
         pk_meta,
+        result,
     )
 
 
@@ -427,7 +490,15 @@ def _compute_max_rel(surrogate: pd.Series, reference: pd.Series) -> float:
 def _enforce_numeric_gates(
     output_dir: Path,
     run_data: List[
-        Tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict[str, object], Dict[str, float]]
+        Tuple[
+            str,
+            pd.DataFrame,
+            pd.DataFrame,
+            pd.DataFrame,
+            Dict[str, object],
+            Dict[str, float],
+            ScenarioResult,
+        ]
     ],
 ) -> None:
     key_columns = ["tumour_volume_l", "pd1_occupancy", "tcell_density_per_ul"]
@@ -435,7 +506,7 @@ def _enforce_numeric_gates(
     max_re_threshold = 5e-3
     event_threshold_hours = 0.5
 
-    for scenario_name, surrogate, reference, events_df, _, _ in run_data:
+    for scenario_name, surrogate, reference, events_df, _, _, _ in run_data:
         issues: List[str] = []
         for column in key_columns:
             if column not in surrogate.columns or column not in reference.columns:
@@ -497,6 +568,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=42, help="Deterministic seed propagated to simulations")
     parser.add_argument("--emit-diagnostics", action="store_true", help="Emit solver/banner diagnostics and error tables")
     parser.add_argument("--numeric-gates", action="store_true", help="Enforce rel_L2/maxRE/event timing thresholds")
+    parser.add_argument(
+        "--dump-flat-debug",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Print the first N samples of key context values to diagnose flat surrogate trajectories",
+    )
     parser.add_argument("--dump-t0", action="store_true", help="Copy equations_eval_t0.csv into the output directory")
     parser.add_argument("--ic-mode", choices=["snapshot", "target_volume"], default="target_volume")
     parser.add_argument("--ic-target-diam-cm", type=float, default=0.5)
@@ -566,16 +644,33 @@ def main(argv: Iterable[str] | None = None) -> int:
     param_overrides = _parse_param_overrides(args.param_override or [])
     module_blocks = [block.strip() for block in (args.module_block or []) if block and block.strip()]
 
+    capture_contexts = args.dump_flat_debug > 0
     results: List[Dict[str, Path]] = []
     metrics_records: List[Dict[str, object]] = []
     worst_alignment: Optional[Dict[str, object]] = None
     observables = ["tumour_volume_l", "pd1_occupancy", "tcell_density_per_ul"]
     run_data: List[
-        Tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict[str, object], Dict[str, float]]
+        Tuple[
+            str,
+            pd.DataFrame,
+            pd.DataFrame,
+            pd.DataFrame,
+            Dict[str, object],
+            Dict[str, float],
+            ScenarioResult,
+        ]
     ] = []
 
     for scenario in scenarios:
-        paths, surrogate_frame, reference_frame, events_df, grid_meta, pk_meta = _run_scenario(
+        (
+            paths,
+            surrogate_frame,
+            reference_frame,
+            events_df,
+            grid_meta,
+            pk_meta,
+            scenario_result,
+        ) = _run_scenario(
             scenario,
             args.output,
             emit_diagnostics=args.emit_diagnostics,
@@ -586,12 +681,26 @@ def main(argv: Iterable[str] | None = None) -> int:
             ic_options=ic_options,
             module_blocks=module_blocks,
             param_overrides=param_overrides,
+            capture_contexts=capture_contexts,
         )
         results.append({"scenario": scenario.name, **paths})
-        run_data.append((scenario.name, surrogate_frame, reference_frame, events_df, grid_meta, pk_meta))
+        run_data.append(
+            (
+                scenario.name,
+                surrogate_frame,
+                reference_frame,
+                events_df,
+                grid_meta,
+                pk_meta,
+                scenario_result,
+            )
+        )
 
         surrogate = surrogate_frame
         reference = reference_frame
+
+        if args.dump_flat_debug:
+            _dump_flat_debug(scenario.name, scenario_result, args.dump_flat_debug)
 
         top_table, worst_sur = summarize_alignment_errors(surrogate, reference, observables)
         if args.emit_diagnostics and not top_table.empty:
@@ -644,8 +753,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     metrics_path = args.output / "metrics.csv"
     metrics_df.to_csv(metrics_path, index=False)
 
-    grid_records = [meta for _, _, _, _, meta, _ in run_data]
-    pk_records = [pk for _, _, _, _, _, pk in run_data]
+    grid_records = [meta for _, _, _, _, meta, _, _ in run_data]
+    pk_records = [pk for _, _, _, _, _, pk, _ in run_data]
     if grid_records:
         grid_frame = pd.DataFrame(grid_records)
         grid_frame.to_csv(args.output / "grid_info.csv", index=False)
