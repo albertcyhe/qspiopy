@@ -169,10 +169,12 @@ def convert_kon(value: float, unit: str) -> float:
         return float(value) * DAY_PER_SECOND
     if norm in {
         "1/(micromolarity*nanometer*second)",
-        "1/(um*nm*second)",
         "1/(micromolarity*nm*second)",
+        "1/(um*nanometer*second)",
+        "1/(um*nm*second)",
+        "1/(um*nm*s)",
     }:
-        return float(value) * 9.8412890625
+        return float(value) * (DAY_PER_SECOND * 1e-3)
     if norm in {"1/(micromolarity*second)", "1/(um*second)"}:
         return float(value) * DAY_PER_SECOND * 1e6
     return float(value)

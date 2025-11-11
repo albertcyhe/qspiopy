@@ -18,7 +18,7 @@ def test_flow_to_l_per_day_converts_from_ml_hour() -> None:
 
 def test_convert_parameter_value_kon_legacy_factor() -> None:
     converted = convert_parameter_value(2.0, "1/(micromolarity*nanometer*second)")
-    assert converted == pytest.approx(2.0 * 9.8412890625)
+    assert converted == pytest.approx(2.0 * (86400.0 * 1e-3))
 
 
 def test_normalise_dose_to_species_handles_concentration_targets() -> None:
