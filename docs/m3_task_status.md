@@ -40,13 +40,14 @@ is also registered for runtime use alongside the PD-1 bridge.【F:src/offline/mo
 
 ## 5. Quick regression on snapshot-derived observables
 
-**Status:** ❌ Outstanding.
+**Status:** ❌ Outstanding (diagnostics added).
 
-A manual smoke test shows that PD-1 occupancy remains effectively flat when the
-bridge is enabled for the `example1` snapshot, and the latest `A1` numeric-gate run
-still fails with large discrepancies in tumour volume, PD-1 occupancy, and the
-T-cell density columns.  The surrogate/regression deltas therefore have not been
-brought back under control.【1647b9†L1-L2】【db9318†L1-L33】
+A1 snapshot runs now capture solver contexts and expose the first few samples via
+`--dump-flat-debug`, showing that `pd1_occupancy` moves by ~3.3×10⁻⁴ but the
+reference trajectory is ≈0.127 at day 21, so the relative error remains nearly one.
+Tumour volume and intratumoural T-cell density also stay within 1×10⁻¹¹ L and
+8×10⁻⁷ cells/µL respectively, confirming that the numerical gap persists despite
+the runtime modules.【F:src/offline/entities.py†L19-L38】【F:scripts/validate_surrogate.py†L84-L119】【412eeb†L27-L33】
 
 ## 6. Regression tests for bridge and geometry dynamics
 
