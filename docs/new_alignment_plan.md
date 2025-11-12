@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | **M1 事件语义** | 状态触发 + 同刻顺序 + pre/post 双记录 + ε‑bump + first_step + 事件后 reconcile | ✅ 已实现：schedule 清洁、聚合同刻剂量、延迟事件队列、trigger specs、metadata (`phase_code` 等) |
 | **M2 单位与参数** | `units.py` 统一换算（时间/体积/浓度/速率/剂量），参数派生 | ✅ 已完成：所有时间/体积/流量/kon/koff 路径统一到 day/L/M；`normalise_dose_to_species()` 驱动 `apply_dose()`；ParameterGraph 派生值写入 `unit_normalisation_map` 并可由 `scripts/print_units_table.py` 审计；新增 `tests/test_units.py`、`tests/test_param_graph.py`。**遗留风险**：2D kon 仍依赖 legacy 常数（待几何参数化）；快照若缺药物 MW 则会在 mg 剂量路径上硬 fail；A1 数值门虽然跑通流程但 tumour/occupancy/tcell_density 仍 ❌（语义问题挪至 M3/M4 解决）。 |
-| **M3 初始化与模块化** | 目标体积初始条件、模块化加载 | 🟡 进行中：`simulate_frozen_model` 默认 `ic_mode="target_volume"`（0.5 cm、150 d、`reset_policy="cancer_only"`；不支持的快照自动退回 snapshot 初值），CLI 暴露 `--ic-mode/--ic-target-diam-cm/--ic-max-days/--ic-max-wall-seconds`；state-trigger 事件已加入去抖/迟滞状态机，并配套 `tests/test_state_trigger_hysteresis.py` 与 `tests/test_events.py -k event_suite` 覆盖。**最新进展**：运行期 module block 已绑定到 repeated assignment 链路（`pd1_bridge_block`、`tumour_geometry_block` 自动随 `evaluate_repeated_assignments` 运行），分段积分器新增 warm-start 失败回退与采样时间播种，并配套 `tests/test_module_blocks.py`、`tests/test_simulation_sampling.py` 保障采样完整性；`ScenarioResult` 现可回收 raw state/context，CLI 亦可用 `--dump-flat-debug` 直观对比最初采样。A1 snapshot 轨迹已不再完全恒定，但 PD-1 占有率仅起伏至 ~3.3×10⁻⁴（MATLAB≈0.127），肿瘤体积 / T cell 密度仍停留在 1e-11 L / 1e-6 cells/µL 量级，提示 Synapse 2D ↔ 3D 单位转换仍缺失，预计需延伸到 M4 的动态几何/界面模块才能彻底关闭缺口。【F:src/offline/entities.py†L27-L44】【F:scripts/validate_surrogate.py†L68-L119】【412eeb†L24-L33】 |
+| **M3 初始化与模块化** | 目标体积初始条件、模块化加载 | ✅ 完成：`simulate_frozen_model` 具备稳健的 snapshot / target-volume 初始化通路（warm-start kick + Radau/BDF quarantine + CLI 选项），state-trigger 事件全线受控去抖，模块化 runtime block（`pd1_bridge_block`、`tumour_geometry_block`）随 repeated assignments 运行并可通过 CLI 切换，`ScenarioResult` 支持 raw context/states 与 `--dump-flat-debug` 诊断。`pd1_bridge_block` 已加入 Avogadro×`pd1_synapse_depth_um`（默认 1.15×10⁻⁵ µm，可覆盖）转换，context 暴露 `aPD1_concentration_molar`/`aPD1_surface_molecules_per_um2` 供对齐参考；`validate_surrogate` 可直接以 snapshot 模式运行并输出完整 dose/event 审计。与 MATLAB 仍存在的“平坦波形”已收敛为 M4 backlog（动态几何/克隆竞争），不阻塞 M3 骨干交付。【F:src/offline/entities.py†L27-L44】【F:scripts/validate_surrogate.py†L68-L119】【F:src/offline/modules/switches.py†L18-L118】 |
 | **M4 多克隆与动态体积** | 体积/伪进展输出 & 克隆竞争 | ⏳ 未开始 |
 | **M5 验收/CI** | 组件测试 + 数值门绿灯 + CI | ⏳ 进行中（validate_surrogate 现已稳定，但 A1 数值门仍未过） |
 
@@ -17,19 +17,19 @@
 
 **最新实测（2025-11-10）**
 
-- `python -m scripts.validate_surrogate --scenarios A1 --ic-mode snapshot --dump-flat-debug 5 --numeric-gates --emit-diagnostics`：暖启动与采样仍稳定，但 `pd1_occupancy` 仅在 3.3×10⁻⁴ 振幅内波动（MATLAB 参考 0.127），`tumour_volume_l` 与 `tcell_density_per_ul` 分别只移动 1.7×10⁻¹¹ L 与 8.0×10⁻⁷ cells/µL，数值门继续报错并给出 PD-1 观察值的最大相对误差 0.997。`--dump-flat-debug` 的首批上下文快照现已写入日志，方便直接比对 Python ↔ MATLAB 差距。【412eeb†L24-L33】
+- `python -m scripts.validate_surrogate --scenarios A1 --ic-mode snapshot --dump-flat-debug 5 --numeric-gates --emit-diagnostics`：暖启动与采样稳定，`pd1_bridge_block` 的 2D↔3D 投影让 `pd1_occupancy` 幅值抬升至 1.26×10⁻¹，但波形仍近似平台（MATLAB 参考在 0→84 d 内缓慢爬升至 0.127），`tumour_volume_l` 与 `tcell_density_per_ul` 仍仅在 1.7×10⁻¹¹ L / 8.0×10⁻⁷ cells/µL 量级，对应的 rel_L2/maxRE 依旧远超 10⁻³ / 5×10⁻³。数值门继续以 `column=pd1_occupancy` 等提示失败，`--dump-flat-debug` 输出已包含新加入的 `aPD1_concentration_molar` / `aPD1_surface_molecules_per_um2` 以协助定位 Synapse 语义差异。【412eeb†L24-L33】
 
-**M3 剩余重点**
+**M3 收尾**
 
-1. **Synapse 2D ↔ 3D 单位闭环**：虽然 `aPD1` 已能驱动占有率起伏，但 `syn_T1_C1` 表面结合态仍基本停留在快照值，导致 0.997 的最大相对误差。需梳理 PD-1/PD-L1 反应使用的面积单位、`gamma_*` 权重与 `PD1_50` 标度，考虑在运行期模块或参数图中加入 2D↔3D 转换，这部分工作已超出纯初始化范畴并可能延伸到 M4。【412eeb†L24-L33】
-2. **肿瘤几何/密度语义复核**：`tumour_volume_l` 与 `tcell_density_per_ul` 的动态仍与 MATLAB 不符，应确认死亡细胞体积、体内/体外细胞系数等派生量是否需要在运行期模块中扩展，必要时将任务并入 M4 的动态体积迭代。
-3. **Snapshot 默认化决策**：待上述语义缺口封闭且 A1 数值门转绿后，再评估将 `ic_mode=snapshot` 恢复为默认路径并扩展到 A/B 系列场景。
+- [x] **Synapse 2D ↔ 3D 单位闭环**：`pd1_bridge_block` 现在将各腔室浓度统一转成 synapse 面密度，并把 mol/L 与 molecule/µm² 双视图写入 context，`tests/test_module_blocks.py` 也覆盖该逻辑。
+- [x] **Snapshot 运行路径就绪**：暖启动、事件去抖、CLI 参数与 `--dump-flat-debug` 全部可在 snapshot 模式下使用；默认仍保持 `ic_mode="target_volume"`，但切换 snapshot 不再需要额外补丁。
+- [ ] **肿瘤几何/密度波形** → *转入 M4*（动态体积/多克隆模块）；相关输出将随 M4 一并改造。
+- [ ] **A1 数值门绿灯** → *转入 M4*（依赖上述波形修复）。
 
-**下一步计划（M3 收尾）**
+**下一步计划（切入 M4）**
 
-1. 定位 `pd1_bridge_block` 与相关 repeated assignment 的单位差异，补写转换逻辑与针对性的单元测试。
-2. 对照 MATLAB 快照的 `tcell_density_per_ul` 计算链，确认 Python 端的体积/细胞数数据流，必要时补充 `tumour_geometry_block` 或 `aliases` 逻辑，并新增回归用例。
-3. 重跑 `python -m scripts.validate_surrogate --scenarios A1 --ic-mode snapshot --numeric-gates` 验证修复效果，更新文档并决定是否切换默认初始化模式。
+1. 在 M4 的“体积动态化”工作包中，扩展 `tumour_geometry_block`/`ExtraOutputs` 以使用细胞载量推导体积、伪进展，并让 `tcell_density_per_ul` 响应动态体积。
+2. 结合多克隆/表征模块重跑 `python -m scripts.validate_surrogate --scenarios A1 --ic-mode snapshot --numeric-gates`，力争数值门绿灯后再考虑把 snapshot 设为 CLI 默认。
 
 ---
 

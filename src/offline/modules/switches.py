@@ -15,6 +15,40 @@ logger = logging.getLogger(__name__)
 
 ModuleBlock = Callable[[MutableMapping[str, float]], None]
 
+AVOGADRO = 6.02214076e23
+LITERS_PER_CUBIC_MICROMETER = 1e-15
+DEFAULT_SYN_DEPTH_UM = 1.15e-5
+
+
+def _resolve_synapse_depth(model: FrozenModel) -> float:
+    """Return the synapse penetration depth (micrometers) for PD-1 bridge conversions."""
+
+    param_keys = (
+        "pd1_synapse_depth_um",
+        "synapse_depth_um",
+        "syn_depth_um",
+    )
+    parameters = getattr(model, "parameters", {}) or {}
+    for key in param_keys:
+        value = parameters.get(key)
+        if value is None:
+            continue
+        try:
+            depth = float(value)
+        except (TypeError, ValueError):
+            continue
+        if depth > 0.0:
+            return depth
+    return DEFAULT_SYN_DEPTH_UM
+
+
+def _molar_to_surface(concentration_molar: float, depth_um: float) -> float:
+    """Convert mol/L into molecules per square micrometer for a thin synapse."""
+
+    if concentration_molar == 0.0 or depth_um <= 0.0:
+        return 0.0
+    return concentration_molar * AVOGADRO * LITERS_PER_CUBIC_MICROMETER * depth_um
+
 
 @dataclass(frozen=True)
 class ModuleBlockSpec:
@@ -57,6 +91,8 @@ def pd1_bridge_block(model: FrozenModel) -> ModuleBlock:
         ("V_LN.nivolumab", "gamma_LN_nivolumab"),
     )
 
+    syn_depth_um = _resolve_synapse_depth(model)
+
     def apply(context: MutableMapping[str, float]) -> None:
         accumulator = 0.0
         has_weight = False
@@ -71,9 +107,15 @@ def pd1_bridge_block(model: FrozenModel) -> ModuleBlock:
             if fallback is None:
                 fallback = context.get("V_C.nivolumab")
             if fallback is None:
+                fallback = context.get("aPD1_concentration_molar")
+            if fallback is None:
                 fallback = context.get("aPD1", 0.0)
             accumulator = float(fallback)
-        context["aPD1"] = accumulator
+        concentration = float(accumulator)
+        surface_density = _molar_to_surface(concentration, syn_depth_um)
+        context["aPD1_concentration_molar"] = concentration
+        context["aPD1_surface_molecules_per_um2"] = surface_density
+        context["aPD1"] = surface_density
 
     return apply
 
