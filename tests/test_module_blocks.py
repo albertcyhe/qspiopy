@@ -8,7 +8,14 @@ from src.offline.modules import (
     resolve_module_blocks,
     tumour_geometry_block,
 )
+from src.offline.modules.switches import (
+    AVOGADRO,
+    DEFAULT_SYN_DEPTH_UM,
+    LITERS_PER_CUBIC_MICROMETER,
+)
 from src.offline.snapshot import load_frozen_model
+
+SURFACE_SCALE = AVOGADRO * LITERS_PER_CUBIC_MICROMETER * DEFAULT_SYN_DEPTH_UM
 
 
 def test_pd1_bridge_block_combines_compartments():
@@ -25,13 +32,14 @@ def test_pd1_bridge_block_combines_compartments():
         "gamma_LN_nivolumab": 0.1,
     }
     block(context)
-    expected = (
+    expected_conc = (
         context["gamma_T_nivolumab"] * context["V_T.nivolumab"]
         + context["gamma_P_nivolumab"] * context["V_P.nivolumab"]
         + context["gamma_C_nivolumab"] * context["V_C.nivolumab"]
         + context["gamma_LN_nivolumab"] * context["V_LN.nivolumab"]
     )
-    assert context["aPD1"] == expected
+    assert context["aPD1_concentration_molar"] == pytest.approx(expected_conc)
+    assert context["aPD1"] == pytest.approx(expected_conc * SURFACE_SCALE)
 
 
 def test_tumour_geometry_block_updates_volume_and_density():
@@ -113,5 +121,6 @@ def test_bind_module_blocks_patches_repeated_assignments():
     )
 
     model.evaluate_repeated_assignments(context)
-    expected = context["gamma_T_nivolumab"] * context["V_T.nivolumab"] + context["gamma_P_nivolumab"] * context["V_P.nivolumab"]
-    assert context["aPD1"] == expected
+    expected_conc = context["gamma_T_nivolumab"] * context["V_T.nivolumab"] + context["gamma_P_nivolumab"] * context["V_P.nivolumab"]
+    assert context["aPD1_concentration_molar"] == pytest.approx(expected_conc)
+    assert context["aPD1"] == pytest.approx(expected_conc * SURFACE_SCALE)
