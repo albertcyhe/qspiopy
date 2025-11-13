@@ -43,7 +43,8 @@ Key takeaway: all PD‑1 and geometry overrides live inside the module, so the s
 
 ### Runtime toggles
 
-- `pd1_alignment_use_whitebox` (plus optional `pd1_whitebox_tau_days`) swaps the legacy filter for the snapshot-derived kon/koff/internalisation ODE.
-- `tcell_alignment_*` (`tau_days`, `w_live`, `w_treg`, `offset_cells`, `min_cells`, `occ_supp_coeff`) implements a first-order follower that feeds `tcell_alignment_state` → `tcell_density_per_ul` until the true `nT1/aT1/T1` slice is ported.
+- `alignment_mode`: 0 = snapshot passthrough, 1 = grey-box (default), 2 = white-box branch. Mode ≥2 also flips the white-box PD-1/T-cell paths automatically.
+- `pd1_alignment_use_whitebox` (plus optional `pd1_whitebox_tau_days`) swaps the legacy filter for the kon/koff/internalisation ODE implemented in `src/offline/modules/pd1_whitebox.py`.
+- `tcell_alignment_use_whitebox` (placeholder) and `tcell_alignment_*` (`tau_days`, `w_live`, `w_treg`, `offset_cells`, `min_cells`, `occ_supp_coeff`) implement a first-order follower that feeds `tcell_alignment_state` → `tcell_density_per_ul` until the true `nT1/aT1/T1` slice is ported.
 
 These outputs satisfy the “管线已跑通 + 有可视化” requirement from 4.2 and unblock the PD‑1 sandbox work in 4.3.

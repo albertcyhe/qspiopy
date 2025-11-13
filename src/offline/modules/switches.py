@@ -6,11 +6,13 @@ import logging
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Literal, MutableMapping, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Literal, MutableMapping, Optional, Sequence, Tuple
 
 from types import MethodType
 
 from ..snapshot import FrozenModel
+from .pd1_whitebox import PD1WhiteboxModel, PD1WhiteboxOutputs
+from .tcell_whitebox import TCellWhiteboxModel
 
 logger = logging.getLogger(__name__)
 
@@ -366,6 +368,12 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
     """Alignment driver with explicit PD-1 and tumour-volume dynamics."""
 
     parameters = model.parameters or {}
+    alignment_mode = int(parameters.get("alignment_mode", 1))
+    if alignment_mode <= 0:
+        def passthrough(context: MutableMapping[str, float]) -> None:
+            return
+
+        return passthrough
     tau_pk = max(float(parameters.get("pd1_pk_tau_decay_days", 14.0)), 1e-6)
     dose_scale = float(parameters.get("pd1_pk_dose_scale", 1.0))
     conc_scale = float(parameters.get("pd1_pk_conc_scale", 1e-6))
@@ -380,8 +388,8 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
     k_int = float(parameters.get("pd1_occ_internalization_per_day", 0.0))
     occ_floor = float(parameters.get("pd1_occ_floor", 0.0))
     occ_ceiling = float(parameters.get("pd1_occ_ceiling", 0.15))
-    use_whitebox_pd1 = bool(parameters.get("pd1_alignment_use_whitebox", 0.0))
-    whitebox_tau_days = max(float(parameters.get("pd1_whitebox_tau_days", 0.0)), 0.0)
+    use_whitebox_pd1 = alignment_mode >= 2 or bool(parameters.get("pd1_alignment_use_whitebox", 0.0))
+    pd1_whitebox_model: Optional[PD1WhiteboxModel] = None
 
     grow_rate = float(parameters.get("geom_growth_per_day", 0.01))
     kill_coeff = float(parameters.get("geom_kill_per_cell_per_day", 1e-14))
@@ -400,6 +408,8 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
     volume_state: float | None = None
     last_time: float | None = None
     tcell_state: float | None = None
+    tcell_whitebox = alignment_mode >= 2 or bool(parameters.get("tcell_alignment_use_whitebox", 0.0))
+    tcell_whitebox_model: Optional[TCellWhiteboxModel] = None
     tcell_tau_days = max(float(parameters.get("tcell_alignment_tau_days", 0.0)), 0.0)
     tcell_w_live = float(parameters.get("tcell_alignment_w_live", 1.0))
     tcell_w_treg = float(parameters.get("tcell_alignment_w_treg", 1.0))
@@ -432,7 +442,7 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
         return min_volume_l
 
     def apply(context: MutableMapping[str, float]) -> None:
-        nonlocal pk_state, occ_state, volume_state, last_time, dose_index, tcell_state
+        nonlocal pk_state, occ_state, volume_state, last_time, dose_index, tcell_state, pd1_whitebox_model, tcell_whitebox_model
 
         refresh_schedule()
         raw_snapshot_occ = float(context.get("H_PD1_C1", occ_state))
@@ -440,8 +450,8 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
         if last_time is None:
             last_time = current_time
             volume_state = _extract_volume_l(context)
-            if use_whitebox_pd1:
-                occ_state = occ_floor
+            if use_whitebox_pd1 and pd1_whitebox_model is None:
+                pd1_whitebox_model = PD1WhiteboxModel.from_context(parameters, context)
         delta_t = max(0.0, current_time - (last_time or current_time))
         last_time = current_time
 
@@ -454,19 +464,21 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
         conc = pk_state * conc_scale
         surface_density = max(pk_state * surface_scale, 0.0)
 
+        pd1_whitebox_raw_value = raw_snapshot_occ
+        context["pd1_whitebox_snapshot_occ"] = raw_snapshot_occ
         if use_whitebox_pd1:
-            if delta_t > 0.0:
-                bind = kon_eff * conc
-                loss = koff_eff + k_int
-                total_rate = bind + loss
-                if total_rate > 0.0:
-                    occ_eq = bind / total_rate
-                    occ_state = occ_eq + (occ_state - occ_eq) * math.exp(-total_rate * delta_t)
-            occ_state = min(max(occ_state, 0.0), 1.0)
+            if pd1_whitebox_model is None:
+                pd1_whitebox_model = PD1WhiteboxModel.from_context(parameters, context)
+            pd1_outputs: PD1WhiteboxOutputs = pd1_whitebox_model.step(surface_density, delta_t)
+            occ_state = pd1_outputs.occupancy
+            pd1_whitebox_raw_value = pd1_outputs.raw_complexes
+            context["pd1_whitebox_complex_density"] = pd1_outputs.complex_density
+            pd1_whitebox_model.writeback(context)
         else:
             if delta_t > 0.0:
                 d_occ = kon_eff * conc * (1.0 - occ_state) - (koff_eff + k_int) * occ_state
                 occ_state = min(max(occ_state + d_occ * delta_t, occ_floor), occ_ceiling)
+            context["pd1_whitebox_complex_density"] = float(context.get("syn_pd1_pdl1", 0.0))
 
         if volume_state is None:
             volume_state = _extract_volume_l(context)
@@ -485,7 +497,7 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
         context["pd1_alignment_pk_state"] = pk_state
         context["pd1_alignment_concentration_M"] = conc
         context["pd1_alignment_volume_l"] = volume_state
-        context["pd1_whitebox_raw_occ"] = raw_snapshot_occ
+        context["pd1_whitebox_raw_occ"] = pd1_whitebox_raw_value
 
         context["tumour_volume_l"] = volume_state
         context["tumor_volume_l"] = volume_state
@@ -495,27 +507,32 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
         context["tumour_diameter_cm"] = 2.0 * radius_cm
         context["tumor_diameter_cm"] = 2.0 * radius_cm
 
-        live_cells = max(float(context.get("V_T.T1", 0.0)), 0.0)
-        treg_cells = max(float(context.get("V_T.T0", 0.0)), 0.0)
-        target_tcells = max(
-            tcell_offset + tcell_w_live * live_cells + tcell_w_treg * treg_cells,
-            tcell_min_cells,
-        )
-        if tcell_occ_supp:
-            target_tcells *= max(0.0, 1.0 - tcell_occ_supp * occ_state)
-        if tcell_state is None:
-            tcell_state = target_tcells
-        elif tcell_tau_days > 0.0 and delta_t > 0.0:
-            beta = math.exp(-delta_t / tcell_tau_days)
-            tcell_state = target_tcells + (tcell_state - target_tcells) * beta
+        if tcell_whitebox:
+            if tcell_whitebox_model is None:
+                tcell_whitebox_model = TCellWhiteboxModel.from_context(parameters, context)
+            tcell_whitebox_model.step(context, delta_t, occ_state)
         else:
-            tcell_state = target_tcells
+            live_cells = max(float(context.get("V_T.T1", 0.0)), 0.0)
+            treg_cells = max(float(context.get("V_T.T0", 0.0)), 0.0)
+            target_tcells = max(
+                tcell_offset + tcell_w_live * live_cells + tcell_w_treg * treg_cells,
+                tcell_min_cells,
+            )
+            if tcell_occ_supp:
+                target_tcells *= max(0.0, 1.0 - tcell_occ_supp * occ_state)
+            if tcell_state is None:
+                tcell_state = target_tcells
+            elif tcell_tau_days > 0.0 and delta_t > 0.0:
+                beta = math.exp(-delta_t / tcell_tau_days)
+                tcell_state = target_tcells + (tcell_state - target_tcells) * beta
+            else:
+                tcell_state = target_tcells
 
-        density = 0.0
-        if volume_state > 0.0:
-            density = tcell_state / max(volume_state * 1e6, 1e-12)
-        context["tcell_alignment_state"] = tcell_state
-        context["tcell_density_per_ul"] = density
+            density = 0.0
+            if volume_state > 0.0:
+                density = tcell_state / max(volume_state * 1e6, 1e-12)
+            context["tcell_alignment_state"] = tcell_state
+            context["tcell_density_per_ul"] = density
 
     return apply
 

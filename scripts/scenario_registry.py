@@ -74,11 +74,7 @@ def a_series(snapshot: str = "example1") -> List[ScenarioSpec]:
             sample_interval_hours=12.0,
             therapy="anti_pd1",
             doses=_build_repeat_series(21 * DAY, 4, 200.0, PD1_TARGET_DEFAULT),
-            context_outputs={
-                "drug_plasma_molar": "V_C.nivolumab",
-                "drug_tumor_molar": "V_T.nivolumab",
-                "pdl1_occupancy": "H_PD1_C1",
-            },
+            context_outputs=_pd1_outputs(),
         ),
         ScenarioSpec(
             name="A2",
@@ -89,7 +85,7 @@ def a_series(snapshot: str = "example1") -> List[ScenarioSpec]:
             sample_interval_hours=12.0,
             therapy="anti_pd1",
             doses=_build_repeat_series(14 * DAY, 6, 240.0, PD1_TARGET_DEFAULT),
-            context_outputs={"drug_plasma_molar": "V_C.nivolumab"},
+            context_outputs=_pd1_outputs(),
         ),
         ScenarioSpec(
             name="A3",
@@ -100,7 +96,7 @@ def a_series(snapshot: str = "example1") -> List[ScenarioSpec]:
             sample_interval_hours=12.0,
             therapy="anti_pd1",
             doses=_build_repeat_series(42 * DAY, 2, 400.0, PD1_TARGET_DEFAULT),
-            context_outputs={"drug_plasma_molar": "V_C.nivolumab"},
+            context_outputs=_pd1_outputs(),
         ),
         ScenarioSpec(
             name="A4",
@@ -111,7 +107,7 @@ def a_series(snapshot: str = "example1") -> List[ScenarioSpec]:
             sample_interval_hours=12.0,
             therapy="anti_pd1",
             doses=_build_repeat_series(14 * DAY, 6, 3.0 * 70.0, PD1_TARGET_DEFAULT),
-            context_outputs={"drug_plasma_molar": "V_C.nivolumab"},
+            context_outputs=_pd1_outputs(),
         ),
         ScenarioSpec(
             name="A5",
@@ -131,7 +127,7 @@ def a_series(snapshot: str = "example1") -> List[ScenarioSpec]:
                 )
             ]
             + _build_repeat_series(21 * DAY, 3, 200.0, PD1_TARGET_DEFAULT),
-            context_outputs={"drug_plasma_molar": "V_C.nivolumab"},
+            context_outputs=_pd1_outputs(),
         ),
         ScenarioSpec(
             name="A6",
@@ -142,7 +138,7 @@ def a_series(snapshot: str = "example1") -> List[ScenarioSpec]:
             sample_interval_hours=12.0,
             therapy="anti_pd1",
             doses=_build_repeat_series(42 * DAY, 2, 50.0, PD1_TARGET_DEFAULT),
-            context_outputs={"drug_plasma_molar": "V_C.nivolumab"},
+            context_outputs=_pd1_outputs(),
         ),
     ]
 
@@ -167,11 +163,7 @@ def microdose(snapshot: str = "example1") -> ScenarioSpec:
                 molecular_weight_g_per_mol=mw,
             )
         ],
-        context_outputs={
-            "drug_plasma_molar": "V_C.nivolumab",
-            "drug_tumor_molar": "V_T.nivolumab",
-            "pdl1_occupancy": "H_PD1_C1",
-        },
+        context_outputs=_pd1_outputs(),
     )
 
 
@@ -188,10 +180,7 @@ def b_series(snapshot: str = "example1") -> List[ScenarioSpec]:
             therapy="anti_pd1",
             doses=_build_repeat_series(21 * DAY, 4, 200.0, PD1_TARGET_DEFAULT)
             + _build_repeat_series(42 * DAY, 2, 70.0, CTLA4_TARGET_DEFAULT),
-            context_outputs={
-                "drug_plasma_molar": "V_C.nivolumab",
-                "ctla4_plasma_molar": "V_C.ipililumab",
-            },
+            context_outputs=_pd1_outputs({"ctla4_plasma_molar": "V_C.ipililumab"}),
         ),
         ScenarioSpec(
             name="B2",
@@ -218,10 +207,7 @@ def b_series(snapshot: str = "example1") -> List[ScenarioSpec]:
                     molecular_weight_g_per_mol=_resolve_drug(CTLA4_TARGET_DEFAULT)[1],
                 ),
             ],
-            context_outputs={
-                "drug_plasma_molar": "V_C.nivolumab",
-                "ctla4_plasma_molar": "V_C.ipililumab",
-            },
+            context_outputs=_pd1_outputs({"ctla4_plasma_molar": "V_C.ipililumab"}),
         ),
         ScenarioSpec(
             name="B3",
@@ -233,10 +219,7 @@ def b_series(snapshot: str = "example1") -> List[ScenarioSpec]:
             therapy="anti_pd1",
             doses=_build_repeat_series(14 * DAY, 6, 240.0, PD1_TARGET_DEFAULT)
             + _build_repeat_series(21 * DAY, 2, 3.0 * 70.0, CTLA4_TARGET_DEFAULT),
-            context_outputs={
-                "drug_plasma_molar": "V_C.nivolumab",
-                "ctla4_plasma_molar": "V_C.ipililumab",
-            },
+            context_outputs=_pd1_outputs({"ctla4_plasma_molar": "V_C.ipililumab"}),
         ),
     ]
 
@@ -280,3 +263,36 @@ __all__ = [
     "HOUR",
     "DAY",
 ]
+PD1_CONTEXT_OUTPUTS: Mapping[str, str] = {
+    "drug_plasma_molar": "V_C.nivolumab",
+    "drug_tumor_molar": "V_T.nivolumab",
+    "pdl1_occupancy": "H_PD1_C1",
+    "syn_pd1_total": "syn_T1_C1.PD1",
+    "syn_pdl1_total": "syn_T1_C1.PDL1",
+    "syn_pdl2_total": "syn_T1_C1.PDL2",
+    "syn_pd1_pdl1": "syn_T1_C1.PD1_PDL1",
+    "syn_pd1_pdl2": "syn_T1_C1.PD1_PDL2",
+    "syn_pd1_apd1": "syn_T1_C1.PD1_aPD1",
+    "syn_pd1_apd1_pd1": "syn_T1_C1.PD1_aPD1_PD1",
+    "tcell_tumour": "V_T.T1",
+    "tcell_treg": "V_T.T0",
+    "tcell_ln": "V_LN.T1",
+    "tcell_peripheral": "V_P.T1",
+    "tcell_central": "V_C.T1",
+    "tcell_total": "T_total",
+    "tcell_total_ln": "T_total_LN",
+    "tcell_kill_rate": "R_Tcell",
+}
+
+
+def _merge_context_outputs(*layers: Mapping[str, str]) -> Dict[str, str]:
+    merged: Dict[str, str] = {}
+    for layer in layers:
+        if not layer:
+            continue
+        merged.update(layer)
+    return merged
+
+
+def _pd1_outputs(extra: Mapping[str, str] | None = None) -> Dict[str, str]:
+    return _merge_context_outputs(extra or {}, PD1_CONTEXT_OUTPUTS)

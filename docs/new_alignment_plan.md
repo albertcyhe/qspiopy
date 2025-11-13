@@ -146,58 +146,47 @@ Success target: rel_RMSE for `tumour_volume_l`, `pd1_occupancy`, and `tcell_dens
 
 # White‑box alignment plan
 
-## White‑box alignment plan (PD‑1, tumour, and T cells)**
+> We’re pivoting away from incremental grey-box tuning. The immediate goal is to implement a **full white-box alignment layer** (PD‑1, tumour growth, T cells) that mirrors the published QSP‑IO equations while preserving the existing snapshot infrastructure (equations.txt, snapshots, CLI tools). Grey-box work (Steps 0‑4) is on hold; the sections above remain for reference.
 
-> Going forward, we will replace the current grey‑box alignment driver with a fully white‑box implementation of the PD‑1 checkpoint and tumour/T‑cell dynamics, while *preserving* the existing frozen‑snapshot infrastructure (equations.txt, JSON parameters, SimBiology‑derived snapshots, and the validate_surrogate tooling). Concretely, we will implement explicit ODEs in Python for (i) antibody PK in the central/peripheral/tumour/LN compartments, (ii) synaptic PD‑1/PD‑L1/PD‑L2 binding and antibody engagement, and (iii) cancer and T‑cell dynamics, including the tumour volume rule and the PD‑1‑dependent killing term, using the published QSP‑IO equations as the primary source of truth. These white‑box modules will live in the alignment layer (e.g. as an extended `alignment_driver_block`) and will read parameters directly from the snapshot/JSON parameter sources. They will *not* change the existing equations.txt or snapshot structure; instead, they will run alongside the frozen model and overwrite only the observables we care about (PD‑1 occupancy, tumour volume, T‑cell density, and derived outputs). This keeps current A‑series/B‑series workflows working, while giving us a transparent, easily extensible Python implementation for future biology changes and Bayesian optimisation.
+## Step 1 – White-box alignment mode (plumbing)
 
-### Step 1 – Carve out a clean “white‑box alignment” mode
+**Goal:** Switch cleanly between snapshot-only, grey-box, and white-box behaviour without touching external callers.
 
-**Goal:** Be able to switch between *snapshot‑only*, *grey‑box*, and *white‑box* drivers without touching the rest of the code.
+1. Introduce a mode flag (`alignment_mode`, default = 1). Mode 0 = snapshot passthrough, mode 1 = current grey-box path, mode 2 = white-box (also respected by `pd1_alignment_use_whitebox` / `tcell_alignment_use_whitebox` overrides).
+2. Keep `simulate_frozen_model(... alignment_driver_block ...)` as the single entry point; the block inspects parameters to choose the branch.
+3. Preserve today’s behaviour as “mode 0/1” so baselines stay runnable.
+4. Reserve a white-box namespace (`*_hat`) for states/observables to avoid clashing with snapshot symbols, then map those back onto the standard outputs (`pd1_occupancy`, `tumour_volume_l`, `tcell_density_per_ul`).
 
-**Tasks:**
+## Step 2 – White-box PD‑1 checkpoint
 
-1. **Add a mode switch** in the alignment driver, controlled purely by parameters:
+**Goal:** Replace the PD‑1 grey-box filter with the actual synaptic binding ODEs plus Hill inhibition.
 
-   * e.g. `alignment_mode ∈ {0: snapshot_only, 1: greybox, 2: whitebox}` or two booleans:
+1. Reuse exporter data (`show_alignment_drivers.m`, `scripts/dump_snapshot_semantics.py`) to pull the kon/koff/internalisation constants and synapse species.
+2. Implement/extend `src/offline/modules/pd1_whitebox.py` so the alignment driver can integrate the receptor equations when `alignment_mode>=2` (already scaffolded; currently mirrors the kon/koff filter and emits `pd1_whitebox_raw_occ`).
+3. Next up: add the missing binding states (PD‑1/PD‑L1/PD‑L2 complexes) and validate the white-box output against MATLAB overlays before wiring it into tumour/T-cell calculations.
 
-     * `pd1_alignment_use_whitebox`
-     * `tcell_alignment_use_whitebox`
-2. **Keep the public API stable**:
+**2025‑11‑13 status**
 
-   * `simulate_frozen_model(..., module_blocks=("alignment_driver_block",))` remains the only entry point.
-   * The block decides internally (from context/parameters) which branch to run.
-3. **Freeze today’s behaviour as mode 0/1**:
+- `PD1WhiteboxModel` now owns the full kon/koff/internalisation system and maps `pd1_whitebox_raw_occ = A_syn·[YY1_hat]` through the Hill function (`PD1_50`, `n_PD1`) before smoothing; see `src/offline/modules/pd1_whitebox.py:13-174` and the updated `alignment_driver_block` plumbing in `src/offline/modules/switches.py:447-501`.
+- Running\
+  `python -m scripts.validate_surrogate --scenarios A1 A2 A3 A4 A5 A6 --ic-mode snapshot --module-block alignment_driver_block --dump-flat-debug 5 --param-override alignment_mode=2 --max-rel-err 1e12`\
+  followed by\
+  `python scripts/dev_pd1_driver_compare.py --scenarios A1 A2 A3 A4 A5 A6 --summary-json artifacts/dev/pd1_compare_summary.json`\
+  generates the new multi-scenario diagnostics under `artifacts/dev/*.png` plus `artifacts/dev/pd1_compare_summary.json`.
+- Current output shows every A-series regimen hitting `pd1_occupancy ≈ 1.0` within the first day (e.g. reference peaks range 0.07–0.62 in the summary JSON), so Step 2 still needs a calibration pass on `PD1_50`, `pd1_pk_surface_scale`, or the kon/koff scalings before we can call it complete.
 
-   * Mode 0: do nothing, purely snapshot outputs.
-   * Mode 1: current grey‑box alignment_driver_block (pd1 filter + geometry/t‑cell followers) – keep it around so you have a working fallback.
-4. **Add explicit “white‑box state namespace”**:
+## Step 3 – White-box tumour/T-cell dynamics
 
-   * Reserve keys like `C_hat`, `T_hat`, `H_PD1_hat`, `V_T_hat`, `pd1_YY1_hat`, etc., so you never conflict with frozen snapshot species.
-   * All white‑box dynamics write into `*_hat` and then finally map to observable names (`tumour_volume_l`, `pd1_occupancy`, `tcell_density_per_ul`).
+**Goal:** Embed the `nT1/aT1/T1` and tumour growth equations so the alignment layer owns the entire PD‑1/T-cell feedback loop.
 
-This step is mostly plumbing; once it’s in, you can iterate on biology without destabilising A1–A6 runners.
+1. Start from the same exported reaction set (Reaction 14–27, tumour volume rule, kill term).
+2. Integrate the subset of ODEs necessary to produce `tumour_volume_l`, `tcell_density_per_ul`, and any derived observables.
+3. Provide hooks for future biology (e.g. additional checkpoints or cytokines) without touching the frozen snapshot.
 
----
+## Step 4 – Validation & retirement plan
 
-### Step 2 – Implement white‑box PD‑1 checkpoint in the alignment driver
-
-**Goal:** Replace the PD‑1 grey‑box filter with an explicit receptor‑binding ODE and Hill‑type inhibition, using the QSP‑IO equations.
-
-#### 2.1 PD‑1 / PD‑L1 / PD‑L2 kinetics
-
-From the QSP‑IO immune checkpoint module:
-
-* Let
-
-  * (Y) = PD‑1 on T cells
-  * (Y_1) = PD‑L1 on cancer cells
-  * (Y_2) = PD‑L2
-  * (A) = anti‑PD‑1 antibody
-  * (A_1) = anti‑PD‑L1 antibody
-
-Core synapse reactions:
-
-[
+1. With white-box PD‑1/T-cell modules in place, re-run A1–A6/B scenarios in “white-box mode” and ensure rel_RMSE < 0.1 across all key observables.
+2. Once parity is confirmed, mark the grey-box branch as deprecated and update the exporter/runbooks to make the white-box alignment layer the default.
 \frac{d[YY_1]}{dt} = k_{\mathrm{on}}^{YY_1}[Y][Y_1] - k_{\mathrm{off}}^{YY_1}[YY_1]
 ]
 
