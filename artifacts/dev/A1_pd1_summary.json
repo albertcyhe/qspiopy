@@ -1,0 +1,16 @@
+{
+  "metrics": {
+    "rmse": 0.046495348205955016,
+    "r2": -2.739309333268098,
+    "delta_auc": -2.690394045038768,
+    "relative_rmse": 0.818756719444454,
+    "max_fractional_error": 1.0475314737445574
+  },
+  "outputs": {
+    "context_csv": "artifacts/dev/A1_pd1_context.csv",
+    "figure": "artifacts/dev/A1_pd1_overlay.png",
+    "surrogate_csv": "artifacts/validation/A1_surrogate.csv",
+    "reference_csv": "artifacts/validation/A1_reference.csv"
+  },
+  "param_overrides": {}
+}

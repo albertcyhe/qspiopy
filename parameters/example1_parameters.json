@@ -138,28 +138,28 @@
   },
   {
     "name":"geom_min_volume_l",
-    "value":0.014,
+    "value":0.010475578779369703,
     "units":"liter",
     "description":"Lower bound applied to surrogate tumour volume",
     "source":"estimated"
   },
   {
     "name":"geom_growth_per_day",
-    "value":0.01,
+    "value":0.00011629530159216756,
     "units":"1/day",
     "description":"Logistic growth rate for alignment driver tumour volume",
     "source":"estimated"
   },
   {
     "name":"geom_kill_per_cell_per_day",
-    "value":1e-14,
+    "value":2.479072833542927e-10,
     "units":"1/(cell*day)",
     "description":"Kill coefficient per intratumoural T cell for alignment driver volume",
     "source":"estimated"
   },
   {
     "name":"geom_volume_cap_l",
-    "value":0.1,
+    "value":0.99505,
     "units":"liter",
     "description":"Carrying capacity for alignment driver tumour volume",
     "source":"estimated"
@@ -918,14 +918,14 @@
   },
   {
     "name":"pd1_occ_floor",
-    "value":0.0,
+    "value":1.0000336225126867e-10,
     "units":"dimensionless",
     "description":"Minimum PD-1 occupancy used by alignment driver",
     "source":"estimated"
   },
   {
     "name":"pd1_occ_ceiling",
-    "value":0.13,
+    "value":0.050002000000000005,
     "units":"dimensionless",
     "description":"Maximum PD-1 occupancy used by alignment driver",
     "source":"estimated"
@@ -984,6 +984,62 @@
     "value":5e-4,
     "units":"dimensionless",
     "description":"Conversion factor from surrogate PK state to surface density",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_alignment_use_whitebox",
+    "value":0,
+    "units":"dimensionless",
+    "description":"Toggle to forward snapshot PD-1 occupancy instead of grey-box filter",
+    "source":"debug"
+  },
+  {
+    "name":"pd1_whitebox_tau_days",
+    "value":0.0,
+    "units":"day",
+    "description":"Optional smoothing time constant when pd1_alignment_use_whitebox=1",
+    "source":"debug"
+  },
+  {
+    "name":"tcell_alignment_tau_days",
+    "value":5.0,
+    "units":"day",
+    "description":"Time constant for T-cell density follower",
+    "source":"estimated"
+  },
+  {
+    "name":"tcell_alignment_w_live",
+    "value":2.0,
+    "units":"dimensionless",
+    "description":"Weight applied to tumour CD8+ T cells when computing follower target",
+    "source":"estimated"
+  },
+  {
+    "name":"tcell_alignment_w_treg",
+    "value":1.0,
+    "units":"dimensionless",
+    "description":"Weight applied to tumour Treg cells when computing follower target",
+    "source":"estimated"
+  },
+  {
+    "name":"tcell_alignment_offset_cells",
+    "value":0.0,
+    "units":"cell",
+    "description":"Baseline T-cell count added to the follower target",
+    "source":"estimated"
+  },
+  {
+    "name":"tcell_alignment_min_cells",
+    "value":0.0,
+    "units":"cell",
+    "description":"Lower bound for the T-cell follower state",
+    "source":"estimated"
+  },
+  {
+    "name":"tcell_alignment_occ_supp_coeff",
+    "value":0.0,
+    "units":"dimensionless",
+    "description":"Optional suppression factor scaling with PD-1 occupancy",
     "source":"estimated"
   },
  

@@ -1,0 +1,8 @@
+{
+  "pd1_alignment_use_whitebox": 1.0,
+  "pd1_pk_dose_scale": 200000.0,
+  "pd1_pk_conc_scale": 0.01,
+  "pd1_occ_kon_scale": 1e-06,
+  "pd1_occ_koff_scale": 1.0,
+  "pd1_whitebox_tau_days": 0.5
+}

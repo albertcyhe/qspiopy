@@ -1,0 +1,60 @@
+{
+  "scenario_id": "A2",
+  "label": "240 mg Q2W \u00d76",
+  "model_script": "example1",
+  "stop_time_days": 84.0,
+  "sample_interval_hours": 12.0,
+  "rtol": 1e-06,
+  "atol": 1e-12,
+  "max_step": null,
+  "doses": [
+    {
+      "name": "A2_dose_1",
+      "drug": "nivolumab",
+      "amount_mg": 240.0,
+      "start_time": 0.0,
+      "interval": 0.0,
+      "repeat_count": 0
+    },
+    {
+      "name": "A2_dose_2",
+      "drug": "nivolumab",
+      "amount_mg": 240.0,
+      "start_time": 14.0,
+      "interval": 0.0,
+      "repeat_count": 0
+    },
+    {
+      "name": "A2_dose_3",
+      "drug": "nivolumab",
+      "amount_mg": 240.0,
+      "start_time": 28.0,
+      "interval": 0.0,
+      "repeat_count": 0
+    },
+    {
+      "name": "A2_dose_4",
+      "drug": "nivolumab",
+      "amount_mg": 240.0,
+      "start_time": 42.0,
+      "interval": 0.0,
+      "repeat_count": 0
+    },
+    {
+      "name": "A2_dose_5",
+      "drug": "nivolumab",
+      "amount_mg": 240.0,
+      "start_time": 56.0,
+      "interval": 0.0,
+      "repeat_count": 0
+    },
+    {
+      "name": "A2_dose_6",
+      "drug": "nivolumab",
+      "amount_mg": 240.0,
+      "start_time": 70.0,
+      "interval": 0.0,
+      "repeat_count": 0
+    }
+  ]
+}

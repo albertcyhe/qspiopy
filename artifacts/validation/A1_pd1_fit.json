@@ -1,0 +1,10 @@
+{
+  "pd1_pk_tau_decay_days": 21.0,
+  "pd1_pk_dose_scale": 150000.0,
+  "pd1_pk_conc_scale": 0.001,
+  "pd1_occ_kon_scale": 1e-08,
+  "pd1_occ_koff_scale": 1.0,
+  "pd1_occ_internalization_per_day": 0.01,
+  "pd1_occ_floor": 1.0000336225126867e-10,
+  "pd1_occ_ceiling": 0.050002000000000005
+}

@@ -154,6 +154,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Fit grey-box observables parameters")
     parser.add_argument("--scenario", default="A1", choices=sorted(SCENARIO_REGISTRY.keys()))
     parser.add_argument(
+        "--scenarios",
+        nargs="+",
+        help="Optional list of scenarios to fit jointly (overrides --scenario when provided)",
+        choices=sorted(SCENARIO_REGISTRY.keys()),
+    )
+    parser.add_argument(
         "--param",
         action="append",
         default=[],
@@ -164,7 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--observable",
         action="append",
-        default=list(DEFAULT_OBSERVABLES),
+        default=None,
         help="Observable to include (default: tumour_volume_l, pd1_occupancy, tcell_density_per_ul)",
     )
     parser.add_argument(
@@ -215,7 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--module-block",
         action="append",
-        default=list(DEFAULT_MODULE_BLOCKS),
+        default=None,
         help="Module blocks to activate during fitting",
     )
     parser.add_argument(
@@ -230,6 +236,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if not args.params:
         parser.error("at least one --param specification is required")
+
+    observable_args = args.observable if args.observable is not None else list(DEFAULT_OBSERVABLES)
+    observables = list(dict.fromkeys(observable_args))
+    module_blocks = args.module_block if args.module_block is not None else list(DEFAULT_MODULE_BLOCKS)
+    module_blocks = [block.strip() for block in module_blocks if block and block.strip()]
 
     param_specs = [_parse_param_spec(p) for p in args.params]
     base_overrides: Dict[str, float] = {}
@@ -252,8 +263,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         name, value = item.split("=", 1)
         weights[name.strip()] = float(value)
 
-    reference_frame = _load_reference_frame(args.scenario)
-    observables = list(dict.fromkeys(args.observable))
+    scenario_names = args.scenarios if args.scenarios else [args.scenario]
+    reference_frames: Dict[str, pd.DataFrame] = {
+        name: _load_reference_frame(name) for name in scenario_names
+    }
 
     ic_options = None
     if args.ic_mode == "target_volume":
@@ -273,25 +286,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     def residuals(theta: np.ndarray) -> np.ndarray:
         overrides = dict(base_overrides)
         overrides.update({spec.name: float(value) for spec, value in zip(param_specs, theta)})
-        try:
-            result = _simulate_for_params(
-                args.scenario,
-                overrides=overrides,
-                module_blocks=args.module_block,
-                ic_mode=args.ic_mode,
-                ic_options=ic_options,
-            )
-        except Exception as exc:  # pragma: no cover - robust optimisation
-            print(f"[fit] simulation failed: {exc}")
-            return np.ones(len(observables) * len(reference_frame), dtype=float) * 1e3
+        residual_chunks: List[np.ndarray] = []
+        for scenario_name in scenario_names:
+            try:
+                result = _simulate_for_params(
+                    scenario_name,
+                    overrides=overrides,
+                    module_blocks=module_blocks,
+                    ic_mode=args.ic_mode,
+                    ic_options=ic_options,
+                )
+            except Exception as exc:  # pragma: no cover - robust optimisation
+                print(f"[fit] simulation failed for {scenario_name}: {exc}")
+                return np.ones(len(observables) * len(reference_frames[scenario_name]), dtype=float) * 1e3
 
-        merged = _merge_frames(result, reference_frame)
-        return _build_residuals(
-            merged,
-            observables=observables,
-            min_ref=args.min_ref_value,
-            weights=weights,
-        )
+            merged = _merge_frames(result, reference_frames[scenario_name])
+            residual_chunks.append(
+                _build_residuals(
+                    merged,
+                    observables=observables,
+                    min_ref=args.min_ref_value,
+                    weights=weights,
+                )
+            )
+        return np.concatenate(residual_chunks, axis=0)
 
     res = least_squares(
         residuals,

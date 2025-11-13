@@ -779,6 +779,15 @@ def simulate_frozen_model(
     pd1_occupancy = []
     tcell_density = []
     contexts: List[Dict[str, float]] = []
+    tcell_params = model.parameters or {}
+    tcell_tau_days = max(float(tcell_params.get("tcell_alignment_tau_days", 0.0)), 0.0)
+    tcell_w_live = float(tcell_params.get("tcell_alignment_w_live", 1.0))
+    tcell_w_treg = float(tcell_params.get("tcell_alignment_w_treg", 1.0))
+    tcell_offset = float(tcell_params.get("tcell_alignment_offset_cells", 0.0))
+    tcell_min_cells = max(float(tcell_params.get("tcell_alignment_min_cells", 0.0)), 0.0)
+    tcell_occ_supp = float(tcell_params.get("tcell_alignment_occ_supp_coeff", 0.0))
+    tcell_state_output: Optional[float] = None
+    prev_time_val: Optional[float] = None
 
     for time_val, vector in zip(sample_times, states):
         vec = vector.copy()
@@ -800,7 +809,24 @@ def simulate_frozen_model(
         density = float(ctx.get("tcell_density_per_ul", 0.0))
         if not density and volume_l > 0.0:
             density = t_tumour / max(volume_l * 1e6, 1e-12)
-        t_total = float(ctx.get("T_total", t_tumour + tumour_t0))
+
+        target_tcells = max(
+            tcell_offset + tcell_w_live * t_tumour + tcell_w_treg * tumour_t0,
+            tcell_min_cells,
+        )
+        if tcell_occ_supp:
+            target_tcells *= max(0.0, 1.0 - tcell_occ_supp * occupancy)
+        delta_t = 0.0 if prev_time_val is None else max(0.0, float(time_val - prev_time_val))
+        prev_time_val = float(time_val)
+
+        if tcell_state_output is None:
+            tcell_state_output = target_tcells
+        elif tcell_tau_days > 0.0 and delta_t > 0.0:
+            beta = math.exp(-delta_t / tcell_tau_days)
+            tcell_state_output = target_tcells + (tcell_state_output - target_tcells) * beta
+        else:
+            tcell_state_output = target_tcells
+        t_total = tcell_state_output
 
         cancer_cells.append(c_cells)
         dead_cells.append(d_cells)

@@ -1,0 +1,15 @@
+time_days
+cancer_cells
+dead_cells
+t_cells
+tumour_volume_l
+tumour_diameter_cm
+pd1_occupancy
+tcell_density_per_ul
+phase_code
+discontinuity_type_code
+event_index
+event_name
+dose_name
+dose_target
+drug_plasma_molar
