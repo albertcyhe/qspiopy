@@ -1,0 +1,14 @@
+{
+  "pd1_occ_tau1_days": 4.999999968517175,
+  "pd1_occ_tau2_days": 4.999999968517175,
+  "pd1_occ_half_saturation": 20.000305492804703,
+  "pd1_occ_delay_steps": 2.0,
+  "geometry_tcell_volume_factor": 11.470125927654601,
+  "geometry_dead_clearance_per_day": 0.05000000033235639,
+  "geometry_dead_swelling_factor": 1.2027958885121588,
+  "geom_tau_days": 14.999999999134884,
+  "geom_kappa_occ_per_day": 0.010000031371495494,
+  "geom_w_live": 3.3681539804126146,
+  "geom_w_tcell": 1.382386105447362,
+  "geom_w_dead": 1.0015253666005175
+}

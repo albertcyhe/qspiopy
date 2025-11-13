@@ -1,0 +1,51 @@
+>> Running model script /Volumes/AlbertSSD/Program/new/qspiopy/matlab/scripts/example1.m
+Model name: Immune Oncology Model
+
+=== Reactions (PD-1 / nivolumab) ===
+  [Reaction_83] V_C.nivolumab <-> V_P.nivolumab
+  [Reaction_84] V_C.nivolumab <-> V_T.nivolumab
+  [Reaction_85] V_C.nivolumab <-> V_LN.nivolumab
+  [Reaction_86] V_T.nivolumab -> V_LN.nivolumab
+  [Reaction_87] V_LN.nivolumab -> V_C.nivolumab
+  [Reaction_88] V_C.nivolumab -> null
+  [Reaction_89] syn_T1_C1.PD1 + syn_T1_C1.PDL1 <-> syn_T1_C1.PD1_PDL1
+  [Reaction_90] syn_T1_C1.PD1 + syn_T1_C1.PDL2 <-> syn_T1_C1.PD1_PDL2
+  [Reaction_91] syn_T1_C1.PD1 <-> syn_T1_C1.PD1_aPD1
+  [Reaction_92] syn_T1_C1.PD1_aPD1 + syn_T1_C1.PD1 <-> syn_T1_C1.PD1_aPD1_PD1
+
+=== Rules (V_T / geometry) ===
+  (repeatedAssignment) V_T = V_Tmin+vol_cell*C_x+vol_Tcell*T_exh+vol_cell*V_T.C1+vol_Tcell*V_T.T1+vol_Tcell*V_T.T0
+  (repeatedAssignment) T_total = 0*cell+V_T.T1+V_T.T0
+  (repeatedAssignment) R_Tcell = 0*cell/day+k_C_T1*V_T.T1*V_T.C1/(C_total+T_total+cell)*(1-H_PD1_C1)
+  (repeatedAssignment) Tregs_ = V_T.T0
+  (repeatedAssignment) aPD1 = V_T.nivolumab
+  (initialAssignment) syn_T1_C1.PD1 = T_PD1_total /A_Tcell
+  (repeatedAssignment) H_PD1_C1 = ((syn_T1_C1.PD1_PDL1+syn_T1_C1.PD1_PDL2)/PD1_50)^n_PD1/(((syn_T1_C1.PD1_PDL1+syn_T1_C1.PD1_PDL2)/PD1_50)^n_PD1 + 1)
+
+=== Events (tumour/PD-1) ===
+  Trigger: V_T.C1<0.9*cell
+    EventFcn 1: V_T.C1 = 0*cell
+
+=== Parameters (geometry / PD-1 keywords) ===
+  H_PD1_C1 = 0.9 dimensionless
+  H_PD1_APC = 0.9 dimensionless
+  kon_PD1_PDL1 = 0.0583333 1/(micromolarity*nanometer*second)
+  aPD1 = 0 molarity
+  q_P_nivolumab = 1.73655e-07 1/second
+  q_T_nivolumab = 8.52e-06 1/second
+  q_LN_nivolumab = 1.73655e-07 1/second
+  q_LD_nivolumab = 0.0015 1/minute
+  k_cl_nivolumab = 7.1813e-07 1/second
+  gamma_C_nivolumab = 0.77378 dimensionless
+  gamma_P_nivolumab = 0.058847 dimensionless
+  gamma_T_nivolumab = 0.718 dimensionless
+  gamma_LN_nivolumab = 0.1 dimensionless
+  kon_PD1_PDL2 = 0.0766667 1/(micromolarity*nanometer*second)
+  kon_PD1_aPD1 = 1.3e+06 1/(molarity*second)
+  koff_PD1_PDL1 = 1.435 1/second
+  koff_PD1_PDL2 = 0.529 1/second
+  koff_PD1_aPD1 = 0.00338 1/second
+  Chi_PD1 = 3.33333 1/nanometer
+  PD1_50 = 20 molecule/micrometer^2
+  n_PD1 = 2 dimensionless
+  T_PD1_total = 60000 molecule

@@ -67,6 +67,104 @@
     "source":"estimated"
   },
   {
+    "name":"geometry_dead_clearance_per_day",
+    "value":0.05,
+    "units":"1/day",
+    "description":"Pseudo-progression filter clearance rate for tumour dead volume",
+    "source":"estimated"
+  },
+  {
+    "name":"geometry_dead_swelling_factor",
+    "value":1.2,
+    "units":"dimensionless",
+    "description":"Scaling factor applied to instantaneous dead-cell volume before smoothing",
+    "source":"estimated"
+  },
+  {
+    "name":"geometry_tcell_volume_factor",
+    "value":1.0,
+    "units":"dimensionless",
+    "description":"Relative volume contribution of intratumoural T cells vs cancer cells",
+    "source":"estimated"
+  },
+  {
+    "name":"geom_tau_days",
+    "value":15.0,
+    "units":"day",
+    "description":"Time constant of smoothed tumour volume follower used for observables",
+    "source":"estimated"
+  },
+  {
+    "name":"geom_kappa_occ_per_day",
+    "value":0.0,
+    "units":"1/day",
+    "description":"Strength of PD-1 occupancy feedback on smoothed tumour volume",
+    "source":"estimated"
+  },
+  {
+    "name":"geom_w_live",
+    "value":1.0,
+    "units":"dimensionless",
+    "description":"Weight of live cancer cell volume in geometry follower",
+    "source":"estimated"
+  },
+  {
+    "name":"geom_w_tcell",
+    "value":1.0,
+    "units":"dimensionless",
+    "description":"Weight of intratumoural T-cell volume in geometry follower",
+    "source":"estimated"
+  },
+  {
+    "name":"geom_w_dead",
+    "value":1.0,
+    "units":"dimensionless",
+    "description":"Weight of smoothed dead-cell volume in geometry follower",
+    "source":"estimated"
+  },
+  {
+    "name":"geom_w_pk",
+    "value":0.01,
+    "units":"dimensionless",
+    "description":"Contribution of surrogate PK driver to tumour volume follower",
+    "source":"estimated"
+  },
+  {
+    "name":"geom_w_occ",
+    "value":0.02,
+    "units":"dimensionless",
+    "description":"Contribution of PD-1 occupancy surrogate to tumour volume follower",
+    "source":"estimated"
+  },
+  {
+    "name":"geom_min_volume_l",
+    "value":0.014,
+    "units":"liter",
+    "description":"Lower bound applied to surrogate tumour volume",
+    "source":"estimated"
+  },
+  {
+    "name":"geom_growth_per_day",
+    "value":0.01,
+    "units":"1/day",
+    "description":"Logistic growth rate for alignment driver tumour volume",
+    "source":"estimated"
+  },
+  {
+    "name":"geom_kill_per_cell_per_day",
+    "value":1e-14,
+    "units":"1/(cell*day)",
+    "description":"Kill coefficient per intratumoural T cell for alignment driver volume",
+    "source":"estimated"
+  },
+  {
+    "name":"geom_volume_cap_l",
+    "value":0.1,
+    "units":"liter",
+    "description":"Carrying capacity for alignment driver tumour volume",
+    "source":"estimated"
+  },
+  {
     "name":"k_C_growth",
     "value":0.012,
     "units":"1/day",
@@ -783,6 +881,111 @@
     "description":"Hill Coefficient for PD1-Induced Reduction of T Cell Killing",
     "source":"estimated"
   }, 
+  {
+    "name":"pd1_occ_tau1_days",
+    "value":7.0,
+    "units":"day",
+    "description":"Primary time constant for PD-1 occupancy filter alignment layer",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_occ_tau2_days",
+    "value":15.0,
+    "units":"day",
+    "description":"Secondary time constant for PD-1 occupancy filter alignment layer",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_occ_delay_steps",
+    "value":0,
+    "units":"dimensionless",
+    "description":"Discrete sample delay applied to PD-1 occupancy filter output",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_occ_volume_sensitivity",
+    "value":0.0,
+    "units":"dimensionless",
+    "description":"Log-volume sensitivity coefficient for effective PD1_50 in filter",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_occ_volume_reference_l",
+    "value":0.014,
+    "units":"liter",
+    "description":"Reference tumour volume used for PD-1 occupancy filter volume coupling",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_occ_floor",
+    "value":0.0,
+    "units":"dimensionless",
+    "description":"Minimum PD-1 occupancy used by alignment driver",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_occ_ceiling",
+    "value":0.13,
+    "units":"dimensionless",
+    "description":"Maximum PD-1 occupancy used by alignment driver",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_occ_kon_scale",
+    "value":1e-8,
+    "units":"dimensionless",
+    "description":"Scaling factor applied to kon_PD1_aPD1 when computing alignment driver occupancy",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_occ_koff_scale",
+    "value":1.0,
+    "units":"dimensionless",
+    "description":"Scaling factor applied to koff_PD1_aPD1 when computing alignment driver occupancy",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_occ_internalization_per_day",
+    "value":0.01,
+    "units":"1/day",
+    "description":"Effective internalization/clearance rate for occupied PD-1 in alignment driver",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_pk_tau_decay_days",
+    "value":21.0,
+    "units":"day",
+    "description":"Decay time constant for surrogate PK driver",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_pk_half_max",
+    "value":0.01,
+    "units":"dimensionless",
+    "description":"Half-saturation value for surrogate PK driver",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_pk_dose_scale",
+    "value":150000.0,
+    "units":"dimensionless",
+    "description":"Scaling factor applied to each anti-PD1 dose in the surrogate PK driver",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_pk_conc_scale",
+    "value":1e-3,
+    "units":"dimensionless",
+    "description":"Conversion factor from surrogate PK state to molar concentration",
+    "source":"estimated"
+  },
+  {
+    "name":"pd1_pk_surface_scale",
+    "value":5e-4,
+    "units":"dimensionless",
+    "description":"Conversion factor from surrogate PK state to surface density",
+    "source":"estimated"
+  },
  
   
   

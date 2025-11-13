@@ -569,6 +569,7 @@ def simulate_frozen_model(
     scheduled_list.sort(key=lambda item: (item.time, item.priority))
     if emit_diagnostics:
         logger.info("scheduled_doses=%d", len(scheduled_list))
+    model._active_dose_schedule = tuple(scheduled_list)
     dose_index = 0
     pending_events: List[ScheduledEvent] = []
     current_state = state

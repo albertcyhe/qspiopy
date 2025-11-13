@@ -8,8 +8,10 @@ from .switches import (
     bind_module_blocks,
     disable_repeated_assignments,
     pd1_bridge_block,
+    pd1_occupancy_filter_block,
     resolve_module_blocks,
     tumour_geometry_block,
+    tumour_geometry_dynamic_block,
 )
 
 __all__ = [
@@ -20,6 +22,8 @@ __all__ = [
     "bind_module_blocks",
     "disable_repeated_assignments",
     "pd1_bridge_block",
+    "pd1_occupancy_filter_block",
     "resolve_module_blocks",
     "tumour_geometry_block",
+    "tumour_geometry_dynamic_block",
 ]

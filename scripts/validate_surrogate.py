@@ -78,7 +78,7 @@ SCENARIO_REGISTRY["A1"] = Scenario(
     sample_interval_hours=A1_SPEC.sample_interval_hours,
     custom_doses=A1_DOSES,
     context_outputs=dict(A1_SPEC.context_outputs),
-    module_blocks=("pd1_bridge_block", "tumour_geometry_block"),
+    module_blocks=("alignment_driver_block",),
 )
 SCENARIO_REGISTRY[MICRO_SPEC.name] = Scenario(
     MICRO_SPEC.name,
@@ -96,6 +96,38 @@ SCENARIO_REGISTRY[MICRO_SPEC.name] = Scenario(
 def _parse_param_overrides(pairs: Iterable[str]) -> Dict[str, float]:
     overrides: Dict[str, float] = {}
     for pair in pairs:
+        if not pair:
+            continue
+        if pair.startswith("@"):
+            path = Path(pair[1:])
+            try:
+                payload = json.loads(path.read_text(encoding="utf8"))
+            except Exception as exc:  # pragma: no cover - CLI validation
+                raise SystemExit(f"Failed to load overrides from '{path}': {exc}") from exc
+            if isinstance(payload, dict):
+                items = payload.items()
+            elif isinstance(payload, list):
+                items = []
+                for entry in payload:
+                    if isinstance(entry, dict) and "name" in entry and "value" in entry:
+                        items.append((entry["name"], entry["value"]))
+                    else:
+                        raise SystemExit(
+                            f"Invalid override entry in '{path}': {entry!r}; "
+                            "expected objects with 'name' and 'value'"
+                        )
+            else:
+                raise SystemExit(
+                    f"Invalid override payload in '{path}'; expected dict or list"
+                )
+            for name, value in items:
+                try:
+                    overrides[str(name).strip()] = float(value)
+                except ValueError as exc:
+                    raise SystemExit(
+                        f"Non-numeric override value for '{name}' in '{path}': {exc}"
+                    ) from exc
+            continue
         if "=" not in pair:
             raise SystemExit(f"Invalid --param-override '{pair}'; expected name=value")
         name, value = pair.split("=", 1)
@@ -215,8 +247,19 @@ def _dump_flat_debug(scenario_name: str, result: ScenarioResult, limit: int) -> 
         ("aPD1", "aPD1"),
         ("H_PD1_C1", "H_PD1_C1"),
         ("pd1_occupancy_ctx", "pd1_occupancy"),
+        ("pd1_filter_input", "pd1_filter_input"),
+        ("pd1_filter_primary", "pd1_filter_primary"),
+        ("pd1_filter_secondary", "pd1_filter_secondary"),
+        ("pd1_filter_output", "pd1_filter_output"),
+        ("pd1_filter_surface_density", "pd1_filter_surface_density"),
+        ("pd1_filter_pd1_50_eff", "pd1_filter_pd1_50_eff"),
         ("tumour_volume_ctx", "tumour_volume_l"),
         ("V_T_ctx", "V_T"),
+        ("geom_live_volume_l", "geom_live_volume_l"),
+        ("geom_dead_instant_volume_l", "geom_dead_instant_volume_l"),
+        ("geom_dead_filtered_volume_l", "geom_dead_filtered_volume_l"),
+        ("geom_target_volume_l", "geom_target_volume_l"),
+        ("geom_volume_smoothed_l", "geom_volume_smoothed_l"),
         ("tcell_density_ctx", "tcell_density_per_ul"),
     ]
     for idx in range(limit):
