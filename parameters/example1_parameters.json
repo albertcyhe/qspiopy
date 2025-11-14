@@ -1001,6 +1001,13 @@
     "source":"debug"
   },
   {
+    "name":"pd1_whitebox_pd1_50_density",
+    "value":3749.215301191367,
+    "units":"molecule/micrometer^2",
+    "description":"Effective PD1_50 surface density used by the white-box PD-1 synapse",
+    "source":"fitted"
+  },
+  {
     "name":"tcell_alignment_tau_days",
     "value":5.0,
     "units":"day",

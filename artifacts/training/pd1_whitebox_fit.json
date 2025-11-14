@@ -1,0 +1,21 @@
+{
+  "loss": 0.01223333272668977,
+  "success": true,
+  "message": "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
+  "log10_params": [
+    0.0,
+    0.0,
+    3.573940380788192,
+    -2.0
+  ],
+  "scaled_parameters": {
+    "kon_PD1_PDL1": 0.05833333333333333,
+    "kon_PD1_PDL2": 0.07666666666666667,
+    "kon_PD1_aPD1": 1300000.0,
+    "koff_PD1_PDL1": 1.4349999999999998,
+    "koff_PD1_PDL2": 0.529,
+    "koff_PD1_aPD1": 3380000.0,
+    "pd1_whitebox_pd1_50_density": 3749.215301191367,
+    "pd1_occ_internalization_per_day": 0.01
+  }
+}

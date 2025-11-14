@@ -43,6 +43,7 @@ class PD1WhiteboxModel:
     synapse_area: float
     pd1_50_density: float
     hill_coefficient: float
+    max_internal_dt: float
 
     @staticmethod
     def _hill_value(raw_complexes: float, half_max: float, hill_coefficient: float) -> float:
@@ -76,6 +77,7 @@ class PD1WhiteboxModel:
         if pd1_50_override is not None:
             pd1_50_density = max(float(pd1_50_override), 1e-12)
         hill_coefficient = float(params.get("n_PD1", 1.0))
+        max_internal_dt = float(params.get("pd1_whitebox_max_step_days", 1e-2) or 1e-2)
 
         def _total_density(
             param_key: str,
@@ -140,6 +142,7 @@ class PD1WhiteboxModel:
             pd1_50_density=pd1_50_density,
             hill_coefficient=hill_coefficient,
             gamma_c_nivolumab=max(gamma_c_nivolumab, 1e-6),
+            max_internal_dt=max(max_internal_dt, 1e-6),
         )
 
     def _pd1_free(self) -> float:
@@ -159,6 +162,28 @@ class PD1WhiteboxModel:
             blocked = self._blocked_fraction()
             return PD1WhiteboxOutputs(self.occ_smoothed, raw_density, self.syn_pd1_pdl1, blocked_fraction=blocked)
 
+        steps = 1
+        if self.max_internal_dt > 0.0 and delta_t > self.max_internal_dt:
+            steps = int(math.ceil(delta_t / self.max_internal_dt))
+        sub_dt = delta_t / steps
+        for _ in range(steps):
+            self._advance_state(antibody_concentration_molar, sub_dt)
+
+        raw_density = max(self.syn_pd1_pdl1 + self.syn_pd1_pdl2, 0.0)
+        raw_occ = self._hill_value(raw_density, self.pd1_50_density, self.hill_coefficient)
+        raw_occ = min(max(raw_occ, 0.0), 1.0)
+        if self.smoothing_tau > 0.0:
+            alpha = math.exp(-delta_t / self.smoothing_tau)
+            self.occ_smoothed = raw_occ + (self.occ_smoothed - raw_occ) * alpha
+        else:
+            self.occ_smoothed = raw_occ
+        blocked = self._blocked_fraction()
+        return PD1WhiteboxOutputs(self.occ_smoothed, raw_density, self.syn_pd1_pdl1, blocked_fraction=blocked)
+
+    def _advance_state(self, antibody_concentration_molar: float, delta_t: float) -> None:
+        if delta_t <= 0.0:
+            return
+
         pd1_free = self._pd1_free()
         pdl1_free = self._pdl1_free()
         pdl2_free = self._pdl2_free()
@@ -176,14 +201,21 @@ class PD1WhiteboxModel:
             - self.koff_pd1_pdl2 * self.syn_pd1_pdl2
             - self.internalisation * self.syn_pd1_pdl2
         )
+        forward_ab = 2.0 * self.kon_pd1_ab * pd1_free * ab_effective
+        reverse_ab = self.koff_pd1_ab * self.syn_pd1_ab
+        forward_dimer = self.chi_pd1 * self.kon_pd1_ab * pd1_free * self.syn_pd1_ab
+        reverse_dimer = 2.0 * self.koff_pd1_ab * self.syn_pd1_ab_pd1
+
         d_pd1_ab = (
-            2.0 * self.kon_pd1_ab * pd1_free * ab_effective
-            - self.koff_pd1_ab * self.syn_pd1_ab
+            forward_ab
+            - reverse_ab
+            - forward_dimer
+            + reverse_dimer
             - self.internalisation * self.syn_pd1_ab
         )
         d_pd1_ab_pd1 = (
-            self.chi_pd1 * self.kon_pd1_ab * pd1_free * self.syn_pd1_ab
-            - 2.0 * self.koff_pd1_ab * self.syn_pd1_ab_pd1
+            forward_dimer
+            - reverse_dimer
             - self.internalisation * self.syn_pd1_ab_pd1
         )
 
@@ -206,17 +238,6 @@ class PD1WhiteboxModel:
             self.syn_pd1_pdl2 *= scale
             self.syn_pd1_ab *= scale
             self.syn_pd1_ab_pd1 *= scale
-
-        raw_density = max(self.syn_pd1_pdl1 + self.syn_pd1_pdl2, 0.0)
-        raw_occ = self._hill_value(raw_density, self.pd1_50_density, self.hill_coefficient)
-        raw_occ = min(max(raw_occ, 0.0), 1.0)
-        if self.smoothing_tau > 0.0:
-            alpha = math.exp(-delta_t / self.smoothing_tau)
-            self.occ_smoothed = raw_occ + (self.occ_smoothed - raw_occ) * alpha
-        else:
-            self.occ_smoothed = raw_occ
-        blocked = self._blocked_fraction()
-        return PD1WhiteboxOutputs(self.occ_smoothed, raw_density, self.syn_pd1_pdl1, blocked_fraction=blocked)
 
     def _blocked_fraction(self) -> float:
         if self.total_pd1 <= 0.0:
