@@ -6,7 +6,7 @@ import logging
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Literal, MutableMapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Literal, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from types import MethodType
 
@@ -22,6 +22,14 @@ AVOGADRO = 6.02214076e23
 LITERS_PER_CUBIC_MICROMETER = 1e-15
 DEFAULT_SYN_DEPTH_UM = 1.15e-5
 SECONDS_PER_DAY = 86400.0
+
+PD1_NIVOLUMAB_WEIGHTED_PAIRS: Tuple[Tuple[str, str], ...] = (
+    ("V_T.nivolumab", "gamma_T_nivolumab"),
+    ("V_P.nivolumab", "gamma_P_nivolumab"),
+    ("V_C.nivolumab", "gamma_C_nivolumab"),
+    ("V_LN.nivolumab", "gamma_LN_nivolumab"),
+)
+PD1_FALLBACK_KEYS: Tuple[str, ...] = ("V_T.nivolumab", "V_C.nivolumab", "aPD1_concentration_molar", "aPD1")
 
 
 def _resolve_synapse_depth(model: FrozenModel) -> float:
@@ -52,6 +60,57 @@ def _molar_to_surface(concentration_molar: float, depth_um: float) -> float:
     if concentration_molar == 0.0 or depth_um <= 0.0:
         return 0.0
     return concentration_molar * AVOGADRO * LITERS_PER_CUBIC_MICROMETER * depth_um
+
+
+def _finite_value(value: object) -> float:
+    """Return a finite float or 0.0 if value is missing/non-finite."""
+
+    try:
+        candidate = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(candidate):
+        return 0.0
+    return candidate
+
+
+def _lookup_gamma(context: Mapping[str, float], parameters: Mapping[str, float], gamma_key: str) -> float:
+    """Fetch a gamma weight from context or parameters."""
+
+    if gamma_key in context:
+        return _finite_value(context.get(gamma_key))
+    return _finite_value(parameters.get(gamma_key))
+
+
+def _project_pd1_to_synapse(
+    context: MutableMapping[str, float],
+    parameters: Mapping[str, float],
+    syn_depth_um: float,
+) -> Tuple[float, float]:
+    """Aggregate nivolumab compartments into synapse concentration/surface density."""
+
+    accumulator = 0.0
+    has_weight = False
+    for species_key, gamma_key in PD1_NIVOLUMAB_WEIGHTED_PAIRS:
+        conc = _finite_value(context.get(species_key))
+        gamma = _lookup_gamma(context, parameters, gamma_key)
+        if conc or gamma:
+            has_weight = True
+        accumulator += gamma * conc
+
+    if not has_weight:
+        for key in PD1_FALLBACK_KEYS:
+            fallback = context.get(key)
+            if fallback is None:
+                continue
+            accumulator = _finite_value(fallback)
+            if accumulator:
+                has_weight = True
+                break
+
+    concentration = accumulator if has_weight else 0.0
+    surface_density = _molar_to_surface(concentration, syn_depth_um)
+    return concentration, surface_density
 
 
 @dataclass(frozen=True)
@@ -88,35 +147,11 @@ def disable_repeated_assignments(model: FrozenModel, targets: Iterable[str] | No
 def pd1_bridge_block(model: FrozenModel) -> ModuleBlock:
     """Build a module block that projects PD-1 drug into the synapse."""
 
-    weighted_pairs = (
-        ("V_T.nivolumab", "gamma_T_nivolumab"),
-        ("V_P.nivolumab", "gamma_P_nivolumab"),
-        ("V_C.nivolumab", "gamma_C_nivolumab"),
-        ("V_LN.nivolumab", "gamma_LN_nivolumab"),
-    )
-
     syn_depth_um = _resolve_synapse_depth(model)
+    parameters = model.parameters or {}
 
     def apply(context: MutableMapping[str, float]) -> None:
-        accumulator = 0.0
-        has_weight = False
-        for species_key, gamma_key in weighted_pairs:
-            conc = float(context.get(species_key, 0.0))
-            gamma = float(context.get(gamma_key, 0.0))
-            if conc or gamma:
-                has_weight = True
-            accumulator += gamma * conc
-        if not has_weight:
-            fallback = context.get("V_T.nivolumab")
-            if fallback is None:
-                fallback = context.get("V_C.nivolumab")
-            if fallback is None:
-                fallback = context.get("aPD1_concentration_molar")
-            if fallback is None:
-                fallback = context.get("aPD1", 0.0)
-            accumulator = float(fallback)
-        concentration = float(accumulator)
-        surface_density = _molar_to_surface(concentration, syn_depth_um)
+        concentration, surface_density = _project_pd1_to_synapse(context, parameters, syn_depth_um)
         context["aPD1_concentration_molar"] = concentration
         context["aPD1_surface_molecules_per_um2"] = surface_density
         context["aPD1"] = surface_density
@@ -368,6 +403,7 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
     """Alignment driver with explicit PD-1 and tumour-volume dynamics."""
 
     parameters = model.parameters or {}
+    synapse_depth_um = _resolve_synapse_depth(model)
     alignment_mode = int(parameters.get("alignment_mode", 1))
     if alignment_mode <= 0:
         def passthrough(context: MutableMapping[str, float]) -> None:
@@ -463,15 +499,20 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
 
         conc = pk_state * conc_scale
         surface_density = max(pk_state * surface_scale, 0.0)
+        if use_whitebox_pd1:
+            conc = _finite_value(context.get("V_T.nivolumab", context.get("aPD1", conc)))
+            surface_density = _molar_to_surface(conc, synapse_depth_um)
 
         pd1_whitebox_raw_value = raw_snapshot_occ
+        pd1_blocked_fraction = occ_state
         context["pd1_whitebox_snapshot_occ"] = raw_snapshot_occ
         if use_whitebox_pd1:
             if pd1_whitebox_model is None:
                 pd1_whitebox_model = PD1WhiteboxModel.from_context(parameters, context)
-            pd1_outputs: PD1WhiteboxOutputs = pd1_whitebox_model.step(surface_density, delta_t)
+            pd1_outputs: PD1WhiteboxOutputs = pd1_whitebox_model.step(conc, delta_t)
             occ_state = pd1_outputs.occupancy
             pd1_whitebox_raw_value = pd1_outputs.raw_complexes
+            pd1_blocked_fraction = pd1_outputs.blocked_fraction
             context["pd1_whitebox_complex_density"] = pd1_outputs.complex_density
             pd1_whitebox_model.writeback(context)
         else:
@@ -490,9 +531,11 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
 
         vt_microliter = volume_state * 1e6
 
-        context["aPD1"] = conc
+        if not use_whitebox_pd1:
+            context["aPD1"] = conc
+        context["aPD1_concentration_molar"] = conc
         context["aPD1_surface_molecules_per_um2"] = surface_density
-        context["pd1_occupancy"] = occ_state
+        context["pd1_occupancy"] = pd1_blocked_fraction
         context["H_PD1_C1"] = occ_state
         context["pd1_alignment_pk_state"] = pk_state
         context["pd1_alignment_concentration_M"] = conc

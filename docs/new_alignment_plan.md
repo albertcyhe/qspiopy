@@ -175,6 +175,24 @@ Success target: rel_RMSE for `tumour_volume_l`, `pd1_occupancy`, and `tcell_dens
   generates the new multi-scenario diagnostics under `artifacts/dev/*.png` plus `artifacts/dev/pd1_compare_summary.json`.
 - Current output shows every A-series regimen hitting `pd1_occupancy ≈ 1.0` within the first day (e.g. reference peaks range 0.07–0.62 in the summary JSON), so Step 2 still needs a calibration pass on `PD1_50`, `pd1_pk_surface_scale`, or the kon/koff scalings before we can call it complete.
 
+### Step 2 fitting strategy (new)
+
+Instead of tuning directly on A1–A6, we will identify the PD‑1 parameters against a **MATLAB-generated training suite** and reserve the published scenarios purely for validation:
+
+1. **Training dataset generation**
+   - Author a MATLAB helper (`matlab/scripts/export_pd1_training_suite.m`) that sweeps dose amount, interval, and tumour state. Aim for ≥500 samples that cover / slightly expand the A-series envelope (e.g. doses 50–1200 mg, Q1W–Q8W, tumour volume 0.01–0.1 L).
+   - Freeze these runs into a single columnar artifact per module:
+     * PD‑1 synapse training → `artifacts/training/pd1_whitebox_training.parquet`
+     * (Later) T‑cell/geometry training → `artifacts/training/tcell_whitebox_training.parquet`
+   - Each row stores `scenario_id`, `time_days`, `dose_amount_mg`, `dose_interval_days`, `tumour_volume_l`, `syn_pd1_pdl*`, `H_PD1_C1`, etc. **Do not create hundreds of tiny CSVs**—append to the shared parquet/HDF5 file so that version control stays manageable.
+2. **Module-specific fitting**
+   - For PD‑1, constrain MATLAB to fixed tumour/T-cell states and vary only the PK inputs; run `scripts/fit_pd1_whitebox.py --training artifacts/training/pd1_whitebox_training.parquet` to regress the kon/koff/PD1_50 scales.
+   - For T cells (Step 3), build a second training set with live tumour dynamics enabled and reuse the same tooling (`scripts/fit_tcell_whitebox.py`).
+3. **Validation gate**
+   - Once the white-box parameters minimise loss on the training parquet, rerun `validate_surrogate` on A1–A6/B to ensure we have not overfit the synthetic data.
+
+Because all MATLAB samples live inside a handful of aggregated files, adding 500–2000 synthetic scenarios remains tractable, and downstream notebooks (or PyTorch/NumPy optimisers) can stream them efficiently.
+
 ## Step 3 – White-box tumour/T-cell dynamics
 
 **Goal:** Embed the `nT1/aT1/T1` and tumour growth equations so the alignment layer owns the entire PD‑1/T-cell feedback loop.

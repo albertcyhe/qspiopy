@@ -2,73 +2,73 @@
   "A1": {
     "pk_state_max": 0.8356545961002786,
     "pk_state_span": 0.05760770498271062,
-    "occ_max": 0.9999998888889012,
+    "occ_max": 0.0555098063865279,
     "occ_min": 0.0,
-    "occ_span": 0.9999998888889012,
+    "occ_span": 0.0555098063865279,
     "first_time_95pct": 1.0,
     "reference_peak": 0.127277931260736,
     "reference_duration": 84.0,
     "figure": "artifacts/dev/A1_pd1_driver_compare.png",
-    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A1_flat_debug_20251113T174358.csv"
+    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A1_flat_debug_20251114T103530.csv"
   },
   "A2": {
     "pk_state_max": 1.504178272980501,
     "pk_state_span": 0.10369386896887889,
-    "occ_max": 0.9999998888889012,
+    "occ_max": 0.0658803663872674,
     "occ_min": 0.0,
-    "occ_span": 0.9999998888889012,
+    "occ_span": 0.0658803663872674,
     "first_time_95pct": 1.0,
     "reference_peak": 0.0699382981392691,
     "reference_duration": 84.0,
     "figure": "artifacts/dev/A2_pd1_driver_compare.png",
-    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A2_flat_debug_20251113T174359.csv"
+    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A2_flat_debug_20251114T103531.csv"
   },
   "A3": {
     "pk_state_max": 0.8356545961002786,
     "pk_state_span": 0.05760770498271062,
-    "occ_max": 0.9999998888889012,
+    "occ_max": 0.105181033943327,
     "occ_min": 0.0,
-    "occ_span": 0.9999998888889012,
+    "occ_span": 0.105181033943327,
     "first_time_95pct": 1.0,
     "reference_peak": 0.179974307228719,
     "reference_duration": 84.0,
     "figure": "artifacts/dev/A3_pd1_driver_compare.png",
-    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A3_flat_debug_20251113T174401.csv"
+    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A3_flat_debug_20251114T103533.csv"
   },
   "A4": {
     "pk_state_max": 1.3161559888579386,
     "pk_state_span": 0.09073213534776925,
-    "occ_max": 0.9999998888889012,
+    "occ_max": 0.0581239741782019,
     "occ_min": 0.0,
-    "occ_span": 0.9999998888889012,
+    "occ_span": 0.0581239741782019,
     "first_time_95pct": 1.0,
     "reference_peak": 0.0790851930733019,
     "reference_duration": 84.0,
     "figure": "artifacts/dev/A4_pd1_driver_compare.png",
-    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A4_flat_debug_20251113T174402.csv"
+    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A4_flat_debug_20251114T103534.csv"
   },
   "A5": {
     "pk_state_max": 1.2534818941504178,
     "pk_state_span": 0.08641155747406626,
-    "occ_max": 0.9999998888889012,
+    "occ_max": 0.1903417281203916,
     "occ_min": 0.0,
-    "occ_span": 0.9999998888889012,
+    "occ_span": 0.1903417281203916,
     "first_time_95pct": 1.0,
     "reference_peak": 0.116452223074051,
     "reference_duration": 84.0,
     "figure": "artifacts/dev/A5_pd1_driver_compare.png",
-    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A5_flat_debug_20251113T174403.csv"
+    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A5_flat_debug_20251114T103536.csv"
   },
   "A6": {
     "pk_state_max": 0.1044568245125348,
     "pk_state_span": 0.007200963122838799,
-    "occ_max": 0.9999998888889012,
+    "occ_max": 0.0144803006090524,
     "occ_min": 0.0,
-    "occ_span": 0.9999998888889012,
+    "occ_span": 0.0144803006090524,
     "first_time_95pct": 1.0,
     "reference_peak": 0.623263552203894,
     "reference_duration": 84.0,
     "figure": "artifacts/dev/A6_pd1_driver_compare.png",
-    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A6_flat_debug_20251113T174405.csv"
+    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A6_flat_debug_20251114T103537.csv"
   }
 }
