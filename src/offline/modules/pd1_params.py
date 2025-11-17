@@ -162,7 +162,7 @@ def load_pd1_parameters_from_entries(entries: Mapping[str, Dict[str, object]]) -
     kon_pd1_ab = k_pd1_ab * SECONDS_PER_DAY
     koff_pd1_ab = kon_pd1_ab * _kd_to_molar(kd_pd1_ab, kd_pd1_ab_u)
 
-    chi_pd1 = _entry_value(entries, "chi_PD1") / max(d_syn_nm, 1e-6)
+    chi_pd1 = _entry_value(entries, "chi_PD1") / max(d_syn_nm, 1e-9)
 
     total_pd1 = _entry_value(entries, "T_PD1_total")
     total_pdl1 = _entry_value(entries, "C_PDL1_total")
