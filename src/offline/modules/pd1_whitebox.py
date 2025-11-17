@@ -150,10 +150,11 @@ class PD1WhiteboxModel:
             reaction_91 = 2.0 * self.params.kon_pd1_ab * pd1_free * ab_effective - self.params.koff_pd1_ab * ab
             reaction_92 = self.params.chi_pd1 * self.params.kon_pd1_ab * pd1_free * ab - 2.0 * self.params.koff_pd1_ab * ab_pd1
 
-            dpdl1 = reaction_89 - self.params.internalisation_per_day * pdl1
-            dpdl2 = reaction_90 - self.params.internalisation_per_day * pdl2
-            dab = reaction_91 - reaction_92 - self.params.internalisation_per_day * ab
-            dab_pd1 = reaction_92 - self.params.internalisation_per_day * ab_pd1
+            area = max(self.params.synapse_area_um2, 1e-6)
+            dpdl1 = reaction_89 / area - self.params.internalisation_per_day * pdl1
+            dpdl2 = reaction_90 / area - self.params.internalisation_per_day * pdl2
+            dab = (reaction_91 - reaction_92) / area - self.params.internalisation_per_day * ab
+            dab_pd1 = reaction_92 / area - self.params.internalisation_per_day * ab_pd1
             return np.array([dpdl1, dpdl2, dab, dab_pd1], dtype=float)
 
         def _advance(t0: float, t1: float, state: np.ndarray, depth: int = 0) -> np.ndarray:
