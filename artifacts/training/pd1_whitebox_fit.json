@@ -1,21 +1,21 @@
 {
-  "loss": 0.01223333272668977,
+  "loss": 0.7592496472679724,
   "success": true,
-  "message": "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
+  "message": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH",
   "log10_params": [
-    0.0,
-    0.0,
-    3.573940380788192,
-    -2.0
+    0.10157741672848854,
+    0.5771167504040029,
+    1.37286217245054,
+    -1.8912325060595236
   ],
   "scaled_parameters": {
-    "kon_PD1_PDL1": 0.05833333333333333,
-    "kon_PD1_PDL2": 0.07666666666666667,
-    "kon_PD1_aPD1": 1300000.0,
-    "koff_PD1_PDL1": 1.4349999999999998,
-    "koff_PD1_PDL2": 0.529,
-    "koff_PD1_aPD1": 3380000.0,
-    "pd1_whitebox_pd1_50_density": 3749.215301191367,
-    "pd1_occ_internalization_per_day": 0.01
+    "kon_PD1_PDL1": 73704.53501873503,
+    "kon_PD1_PDL2": 96868.81745319461,
+    "kon_PD1_aPD1": 1642558.208988952,
+    "koff_PD1_PDL1": 5.419617687537679,
+    "koff_PD1_PDL2": 1.997893907113193,
+    "koff_PD1_aPD1": 0.012765371277963315,
+    "pd1_whitebox_pd1_50_density": 23.597292314669435,
+    "pd1_occ_internalization_per_day": 0.012845987466268045
   }
 }

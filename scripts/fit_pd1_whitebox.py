@@ -6,21 +6,22 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Iterable, List
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
 import sys
-import math
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.offline.modules.pd1_params import PD1Params, load_pd1_parameters_from_file
+from src.offline.segment_integrator import SolverConfig
 from src.offline.modules.pd1_whitebox import PD1WhiteboxModel
 
 
@@ -31,39 +32,6 @@ class ScenarioData:
     concentration: np.ndarray
     target: np.ndarray
     init_context: Dict[str, float]
-
-
-def load_parameters(path: Path) -> Dict[str, float]:
-    payload = json.loads(path.read_text())
-    params = {}
-    for entry in payload:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name")
-        if name is None:
-            continue
-        value = entry.get("value")
-        if value is not None:
-            params[name] = float(value)
-    # Fill derived PD-1 constants if missing
-    d_syn = params.get("d_syn", 1.0)
-    if "kon_PD1_PDL1" not in params and "k_PD1_PDL1" in params:
-        params["kon_PD1_PDL1"] = params["k_PD1_PDL1"] / d_syn
-    if "kon_PD1_PDL2" not in params and "k_PD1_PDL2" in params:
-        params["kon_PD1_PDL2"] = params["k_PD1_PDL2"] / d_syn
-    if "koff_PD1_PDL1" not in params and "k_PD1_PDL1" in params and "kd_PD1_PDL1" in params:
-        params["koff_PD1_PDL1"] = params["k_PD1_PDL1"] * params["kd_PD1_PDL1"]
-    if "koff_PD1_PDL2" not in params and "k_PD1_PDL2" in params and "kd_PD1_PDL2" in params:
-        params["koff_PD1_PDL2"] = params["k_PD1_PDL2"] * params["kd_PD1_PDL2"]
-    if "koff_PD1_aPD1" not in params and "kon_PD1_aPD1" in params and "kd_PD1_aPD1" in params:
-        params["koff_PD1_aPD1"] = params["kon_PD1_aPD1"] * params["kd_PD1_aPD1"]
-    if "A_Tcell" not in params and "D_Tcell" in params:
-        d_t = params["D_Tcell"]
-        params["A_Tcell"] = 4.0 * math.pi * (d_t / 2.0) ** 2
-    if "A_cell" not in params and "D_cell" in params:
-        d_c = params["D_cell"]
-        params["A_cell"] = 4.0 * math.pi * (d_c / 2.0) ** 2
-    return params
 
 
 def prepare_training(frame: pd.DataFrame) -> List[ScenarioData]:
@@ -99,10 +67,11 @@ def prepare_training(frame: pd.DataFrame) -> List[ScenarioData]:
 
 def simulate_scenario(
     scenario: ScenarioData,
-    parameters: Dict[str, float],
+    parameters: PD1Params,
 ) -> np.ndarray:
     context = dict(scenario.init_context)
-    model = PD1WhiteboxModel.from_context(parameters, context)
+    solver_cfg = SolverConfig(method="BDF", rtol=parameters.solver_rtol, atol=parameters.solver_atol, max_step=parameters.max_step_days, seed=None)
+    model = PD1WhiteboxModel.from_context(parameters, context, solver_config=solver_cfg)
     preds = np.empty_like(scenario.target)
     for idx, (dt, conc) in enumerate(zip(scenario.dt, scenario.concentration)):
         outputs = model.step(conc, max(dt, 0.0))
@@ -112,7 +81,7 @@ def simulate_scenario(
 
 def filter_valid_scenarios(
     scenarios: Iterable[ScenarioData],
-    parameters: Dict[str, float],
+    parameters: PD1Params,
 ) -> List[ScenarioData]:
     valid: List[ScenarioData] = []
     skipped: List[str] = []
@@ -129,28 +98,29 @@ def filter_valid_scenarios(
 
 def fit_parameters(
     scenarios: Iterable[ScenarioData],
-    base_params: Dict[str, float],
+    base_params: PD1Params,
     *,
     output_json: Path,
-) -> Dict[str, float]:
+) -> PD1Params:
     scenario_list = list(scenarios)
     total_points = sum(len(s.target) for s in scenario_list)
 
-    def make_params(vec: np.ndarray) -> Dict[str, float]:
+    def make_params(vec: np.ndarray) -> PD1Params:
         kon_scale = 10.0 ** vec[0]
         koff_scale = 10.0 ** vec[1]
         pd1_50_density = 10.0 ** vec[2]
         internalization = 10.0 ** vec[3]
-        params = dict(base_params)
-        params["kon_PD1_PDL1"] = base_params["kon_PD1_PDL1"] * kon_scale
-        params["kon_PD1_PDL2"] = base_params["kon_PD1_PDL2"] * kon_scale
-        params["kon_PD1_aPD1"] = base_params["kon_PD1_aPD1"] * kon_scale
-        params["koff_PD1_PDL1"] = base_params["koff_PD1_PDL1"] * koff_scale
-        params["koff_PD1_PDL2"] = base_params["koff_PD1_PDL2"] * koff_scale
-        params["koff_PD1_aPD1"] = base_params["koff_PD1_aPD1"] * koff_scale
-        params["pd1_whitebox_pd1_50_density"] = pd1_50_density
-        params["pd1_occ_internalization_per_day"] = internalization
-        return params
+        return replace(
+            base_params,
+            kon_pd1_pdl1=base_params.kon_pd1_pdl1 * kon_scale,
+            kon_pd1_pdl2=base_params.kon_pd1_pdl2 * kon_scale,
+            kon_pd1_ab=base_params.kon_pd1_ab * kon_scale,
+            koff_pd1_pdl1=base_params.koff_pd1_pdl1 * koff_scale,
+            koff_pd1_pdl2=base_params.koff_pd1_pdl2 * koff_scale,
+            koff_pd1_ab=base_params.koff_pd1_ab * koff_scale,
+            pd1_50_density=pd1_50_density,
+            internalisation_per_day=internalization,
+        )
 
     def objective(vec: np.ndarray) -> float:
         params = make_params(vec)
@@ -183,16 +153,7 @@ def fit_parameters(
         "success": bool(result.success),
         "message": result.message,
         "log10_params": result.x.tolist(),
-        "scaled_parameters": {
-            "kon_PD1_PDL1": best_params["kon_PD1_PDL1"],
-            "kon_PD1_PDL2": best_params["kon_PD1_PDL2"],
-            "kon_PD1_aPD1": best_params["kon_PD1_aPD1"],
-            "koff_PD1_PDL1": best_params["koff_PD1_PDL1"],
-            "koff_PD1_PDL2": best_params["koff_PD1_PDL2"],
-            "koff_PD1_aPD1": best_params["koff_PD1_aPD1"],
-            "pd1_whitebox_pd1_50_density": best_params["pd1_whitebox_pd1_50_density"],
-            "pd1_occ_internalization_per_day": best_params["pd1_occ_internalization_per_day"],
-        },
+        "scaled_parameters": asdict(best_params),
     }
     output_json.parent.mkdir(parents=True, exist_ok=True)
     output_json.write_text(json.dumps(payload, indent=2))
@@ -204,6 +165,18 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--training-path", type=Path, default=Path("artifacts/training/pd1_whitebox_training.parquet"))
     parser.add_argument("--parameter-file", type=Path, default=Path("parameters/example1_parameters.json"))
     parser.add_argument("--output-json", type=Path, default=Path("artifacts/training/pd1_whitebox_fit.json"))
+    parser.add_argument(
+        "--max-scenarios",
+        type=int,
+        default=None,
+        help="Optional cap on the number of training scenarios to accelerate local experiments.",
+    )
+    parser.add_argument(
+        "--pd1-max-step-days",
+        type=float,
+        default=0.05,
+        help="Override pd1_whitebox_max_step_days during fitting (default: 0.05 days).",
+    )
     args = parser.parse_args(argv)
 
     if not args.training_path.is_file():
@@ -211,22 +184,27 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     frame = pd.read_parquet(args.training_path)
     scenarios = prepare_training(frame)
-    base_params = load_parameters(args.parameter_file)
+    if args.max_scenarios is not None and args.max_scenarios > 0:
+        scenarios = scenarios[: args.max_scenarios]
+    base_params = load_pd1_parameters_from_file(args.parameter_file)
+    if args.pd1_max_step_days is not None and args.pd1_max_step_days > 0:
+        base_params = replace(base_params, max_step_days=float(args.pd1_max_step_days))
     valid_scenarios = filter_valid_scenarios(scenarios, base_params)
     best_params = fit_parameters(valid_scenarios, base_params, output_json=args.output_json)
 
     print("Fit complete. Key parameters:")
-    for key in [
-        "kon_PD1_PDL1",
-        "kon_PD1_PDL2",
-        "kon_PD1_aPD1",
-        "koff_PD1_PDL1",
-        "koff_PD1_PDL2",
-        "koff_PD1_aPD1",
-        "pd1_whitebox_pd1_50_density",
-        "pd1_occ_internalization_per_day",
-    ]:
-        print(f"  {key}: {best_params[key]:.6g}")
+    key_map = {
+        "kon_PD1_PDL1": best_params.kon_pd1_pdl1,
+        "kon_PD1_PDL2": best_params.kon_pd1_pdl2,
+        "kon_PD1_aPD1": best_params.kon_pd1_ab,
+        "koff_PD1_PDL1": best_params.koff_pd1_pdl1,
+        "koff_PD1_PDL2": best_params.koff_pd1_pdl2,
+        "koff_PD1_aPD1": best_params.koff_pd1_ab,
+        "pd1_whitebox_pd1_50_density": best_params.pd1_50_density,
+        "pd1_occ_internalization_per_day": best_params.internalisation_per_day,
+    }
+    for key, value in key_map.items():
+        print(f"  {key}: {value:.6g}")
     return 0
 
 

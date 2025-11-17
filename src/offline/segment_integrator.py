@@ -8,14 +8,16 @@ import json
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import logging
+import time
+
 import numpy as np
 from scipy.integrate import solve_ivp
 
 from .entities import EventEntry, ScheduledDose
 from .errors import NumericsError
 from .snapshot import FrozenModel
-import time
-import logging
+from .stiff_ode import solve_stiff_ivp
 
 logger = logging.getLogger(__name__)
 
@@ -661,15 +663,13 @@ def run_segmented_integration(
                 options.max_step_cap_days,
                 limit_max_step,
             )
-            sol = solve_ivp(
+            sol = solve_stiff_ivp(
                 model.rhs,
                 (current_time, integration_stop),
                 state,
-                method=solver_config.method,
-                rtol=solver_config.rtol,
-                atol=solver_config.atol,
-                max_step=max_step,
+                solver_config,
                 first_step=first_step,
+                max_step=max_step,
                 dense_output=True,
                 events=trigger_functions if trigger_functions else None,
                 jac_sparsity=jac_sparsity,

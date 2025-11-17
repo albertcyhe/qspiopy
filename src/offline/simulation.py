@@ -449,6 +449,7 @@ def simulate_frozen_model(
         max_step=float(max_step),
         seed=seed,
     )
+    setattr(model, "_solver_config", solver_config)
     _log_solver_banner(model, solver_config, days, emit_diagnostics)
     _time_unit_sniff(model, sample_interval_hours)
     t0_opts = t0_options or T0Options()

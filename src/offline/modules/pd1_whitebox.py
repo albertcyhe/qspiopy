@@ -6,14 +6,16 @@ from dataclasses import dataclass
 from typing import Mapping, MutableMapping
 
 import math
+import numpy as np
 
-SECONDS_PER_DAY = 86400.0
+from ..errors import NumericsError
+from ..segment_integrator import SolverConfig
+from ..stiff_ode import integrate_local_system
+from .pd1_params import PD1Params
 
 
 @dataclass
 class PD1WhiteboxOutputs:
-    """Container for PD-1 white-box step results."""
-
     occupancy: float
     raw_complexes: float
     complex_density: float
@@ -22,28 +24,64 @@ class PD1WhiteboxOutputs:
 
 @dataclass
 class PD1WhiteboxModel:
-    total_pd1: float
-    total_pdl1: float
-    total_pdl2: float
-    kon_pd1_pdl1: float
-    koff_pd1_pdl1: float
-    kon_pd1_pdl2: float
-    koff_pd1_pdl2: float
-    kon_pd1_ab: float
-    koff_pd1_ab: float
-    chi_pd1: float
-    internalisation: float
-    smoothing_tau: float
+    params: PD1Params
+    solver_config: SolverConfig
+    total_pd1_density: float
+    total_pdl1_density: float
+    total_pdl2_density: float
     occ_smoothed: float
     syn_pd1_pdl1: float
     syn_pd1_pdl2: float
     syn_pd1_ab: float
     syn_pd1_ab_pd1: float
-    gamma_c_nivolumab: float
-    synapse_area: float
-    pd1_50_density: float
-    hill_coefficient: float
-    max_internal_dt: float
+    time_days: float
+
+    @classmethod
+    def from_context(
+        cls,
+        params: PD1Params,
+        context: Mapping[str, float],
+        solver_config: SolverConfig | None = None,
+    ) -> PD1WhiteboxModel:
+        def _density(key: str, fallback: float) -> float:
+            value = context.get(key)
+            if value is None:
+                return fallback
+            try:
+                return max(float(value), 0.0)
+            except (TypeError, ValueError):
+                return fallback
+
+        pd1_density = _density("syn_pd1_total", params.pd1_surface_density())
+        pdl1_density = _density("syn_pdl1_total", params.pdl1_surface_density())
+        pdl2_density = _density("syn_pdl2_total", params.pdl2_surface_density())
+        syn_pd1_pdl1 = _density("syn_pd1_pdl1", 0.0)
+        syn_pd1_pdl2 = _density("syn_pd1_pdl2", 0.0)
+        syn_pd1_ab = _density("syn_pd1_apd1", 0.0)
+        syn_pd1_ab_pd1 = _density("syn_pd1_apd1_pd1", 0.0)
+        initial_raw = max(syn_pd1_pdl1 + syn_pd1_pdl2, 0.0)
+        occ_smoothed = cls._hill_value(initial_raw, params.pd1_50_density, params.hill_coefficient)
+        time_days = float(context.get("time_days", context.get("t", 0.0)))
+        cfg = solver_config or SolverConfig(
+            method="BDF",
+            rtol=params.solver_rtol,
+            atol=params.solver_atol,
+            max_step=params.max_step_days,
+            seed=None,
+        )
+        return cls(
+            params=params,
+            solver_config=cfg,
+            total_pd1_density=pd1_density,
+            total_pdl1_density=pdl1_density,
+            total_pdl2_density=pdl2_density,
+            occ_smoothed=occ_smoothed,
+            syn_pd1_pdl1=syn_pd1_pdl1,
+            syn_pd1_pdl2=syn_pd1_pdl2,
+            syn_pd1_ab=syn_pd1_ab,
+            syn_pd1_ab_pd1=syn_pd1_ab_pd1,
+            time_days=time_days,
+        )
 
     @staticmethod
     def _hill_value(raw_complexes: float, half_max: float, hill_coefficient: float) -> float:
@@ -56,199 +94,105 @@ class PD1WhiteboxModel:
             return 0.0
         return numerator / denominator
 
-    @classmethod
-    def from_context(cls, params: Mapping[str, float], context: Mapping[str, float]) -> "PD1WhiteboxModel":
-        def get_context(name: str, fallback: float = 0.0) -> float:
-            return float(context.get(name, fallback))
-
-        kon_pd1_pdl1 = float(params.get("kon_PD1_PDL1", 0.0)) * SECONDS_PER_DAY
-        kon_pd1_pdl2 = float(params.get("kon_PD1_PDL2", 0.0)) * SECONDS_PER_DAY
-        kon_pd1_ab = float(params.get("kon_PD1_aPD1", 0.0)) * SECONDS_PER_DAY
-        koff_pd1_pdl1 = float(params.get("koff_PD1_PDL1", 0.0)) * SECONDS_PER_DAY
-        koff_pd1_pdl2 = float(params.get("koff_PD1_PDL2", 0.0)) * SECONDS_PER_DAY
-        koff_pd1_ab = float(params.get("koff_PD1_aPD1", 0.0)) * SECONDS_PER_DAY
-        chi_pd1 = float(params.get("Chi_PD1", 1.0))
-        internalisation = float(params.get("pd1_occ_internalization_per_day", 0.0))
-        smoothing_tau = float(params.get("pd1_whitebox_tau_days", 0.0))
-        gamma_c_nivolumab = float(params.get("gamma_C_nivolumab", 1.0))
-        synapse_area = max(float(params.get("A_syn", 1.0)), 1e-6)
-        pd1_50_density = max(float(params.get("PD1_50", 1.0)), 1e-12)
-        pd1_50_override = params.get("pd1_whitebox_pd1_50_density")
-        if pd1_50_override is not None:
-            pd1_50_density = max(float(pd1_50_override), 1e-12)
-        hill_coefficient = float(params.get("n_PD1", 1.0))
-        max_internal_dt = float(params.get("pd1_whitebox_max_step_days", 1e-2) or 1e-2)
-
-        def _total_density(
-            param_key: str,
-            context_key: str,
-            area_param_key: str,
-            default: float = 0.0,
-        ) -> float:
-            ctx_value = context.get(context_key)
-            if ctx_value is not None:
-                try:
-                    density = float(ctx_value)
-                except (TypeError, ValueError):
-                    density = float("nan")
-                if math.isfinite(density) and density > 0.0:
-                    return density
-            param_value = params.get(param_key, default)
-            if param_value is None:
-                return max(default, 0.0)
-            try:
-                molecules = float(param_value)
-            except (TypeError, ValueError):
-                molecules = default
-            area_value = params.get(area_param_key, synapse_area)
-            try:
-                area = float(area_value)
-            except (TypeError, ValueError):
-                area = synapse_area
-            if area <= 0.0:
-                area = synapse_area
-            return max(molecules / area, 0.0)
-
-        total_pd1 = _total_density("T_PD1_total", "syn_pd1_total", "A_Tcell")
-        total_pdl1 = _total_density("C_PDL1_total", "syn_pdl1_total", "A_cell")
-        total_pdl2 = _total_density("C_PDL2_total", "syn_pdl2_total", "A_cell")
-
-        syn_pd1_pdl1 = get_context("syn_pd1_pdl1", 0.0)
-        syn_pd1_pdl2 = get_context("syn_pd1_pdl2", 0.0)
-        syn_pd1_ab = get_context("syn_pd1_apd1", 0.0)
-        syn_pd1_ab_pd1 = get_context("syn_pd1_apd1_pd1", 0.0)
-        initial_raw = synapse_area * max(syn_pd1_pdl1, 0.0)
-        occ_smoothed = cls._hill_value(initial_raw, pd1_50_density, hill_coefficient)
-
-        return cls(
-            total_pd1=max(total_pd1, 0.0),
-            total_pdl1=max(total_pdl1, 0.0),
-            total_pdl2=max(total_pdl2, 0.0),
-            kon_pd1_pdl1=kon_pd1_pdl1,
-            koff_pd1_pdl1=koff_pd1_pdl1,
-            kon_pd1_pdl2=kon_pd1_pdl2,
-            koff_pd1_pdl2=koff_pd1_pdl2,
-            kon_pd1_ab=kon_pd1_ab,
-            koff_pd1_ab=koff_pd1_ab,
-            chi_pd1=chi_pd1,
-            internalisation=max(internalisation, 0.0),
-            smoothing_tau=max(smoothing_tau, 0.0),
-            occ_smoothed=occ_smoothed,
-            syn_pd1_pdl1=max(syn_pd1_pdl1, 0.0),
-            syn_pd1_pdl2=max(syn_pd1_pdl2, 0.0),
-            syn_pd1_ab=max(syn_pd1_ab, 0.0),
-            syn_pd1_ab_pd1=max(syn_pd1_ab_pd1, 0.0),
-            synapse_area=synapse_area,
-            pd1_50_density=pd1_50_density,
-            hill_coefficient=hill_coefficient,
-            gamma_c_nivolumab=max(gamma_c_nivolumab, 1e-6),
-            max_internal_dt=max(max_internal_dt, 1e-6),
-        )
-
     def _pd1_free(self) -> float:
         bound = self.syn_pd1_pdl1 + self.syn_pd1_pdl2 + self.syn_pd1_ab + 2.0 * self.syn_pd1_ab_pd1
-        return max(self.total_pd1 - bound, 0.0)
+        return max(self.total_pd1_density - bound, 0.0)
 
     def _pdl1_free(self) -> float:
-        return max(self.total_pdl1 - self.syn_pd1_pdl1, 0.0)
+        return max(self.total_pdl1_density - self.syn_pd1_pdl1, 0.0)
 
     def _pdl2_free(self) -> float:
-        return max(self.total_pdl2 - self.syn_pd1_pdl2, 0.0)
+        return max(self.total_pdl2_density - self.syn_pd1_pdl2, 0.0)
 
     def step(self, antibody_concentration_molar: float, delta_t: float) -> PD1WhiteboxOutputs:
         delta_t = max(float(delta_t), 0.0)
         if delta_t <= 0.0:
-            raw_density = max(self.syn_pd1_pdl1 + self.syn_pd1_pdl2, 0.0)
             blocked = self._blocked_fraction()
+            raw_density = max(self.syn_pd1_pdl1 + self.syn_pd1_pdl2, 0.0)
             return PD1WhiteboxOutputs(self.occ_smoothed, raw_density, self.syn_pd1_pdl1, blocked_fraction=blocked)
 
-        steps = 1
-        if self.max_internal_dt > 0.0 and delta_t > self.max_internal_dt:
-            steps = int(math.ceil(delta_t / self.max_internal_dt))
-        sub_dt = delta_t / steps
-        for _ in range(steps):
-            self._advance_state(antibody_concentration_molar, sub_dt)
+        start_time = self.time_days
+        end_time = start_time + delta_t
+        self._integrate_segment(antibody_concentration_molar, start_time, end_time)
+        self.time_days = end_time
 
         raw_density = max(self.syn_pd1_pdl1 + self.syn_pd1_pdl2, 0.0)
-        raw_occ = self._hill_value(raw_density, self.pd1_50_density, self.hill_coefficient)
+        raw_occ = self._hill_value(raw_density, self.params.pd1_50_density, self.params.hill_coefficient)
         raw_occ = min(max(raw_occ, 0.0), 1.0)
-        if self.smoothing_tau > 0.0:
-            alpha = math.exp(-delta_t / self.smoothing_tau)
+        if self.params.smoothing_tau_days > 0.0:
+            alpha = math.exp(-delta_t / self.params.smoothing_tau_days)
             self.occ_smoothed = raw_occ + (self.occ_smoothed - raw_occ) * alpha
         else:
             self.occ_smoothed = raw_occ
         blocked = self._blocked_fraction()
         return PD1WhiteboxOutputs(self.occ_smoothed, raw_density, self.syn_pd1_pdl1, blocked_fraction=blocked)
 
-    def _advance_state(self, antibody_concentration_molar: float, delta_t: float) -> None:
-        if delta_t <= 0.0:
+    def _integrate_segment(self, antibody_concentration_molar: float, start_time: float, end_time: float) -> None:
+        if end_time <= start_time:
             return
 
-        pd1_free = self._pd1_free()
-        pdl1_free = self._pdl1_free()
-        pdl2_free = self._pdl2_free()
         ab_concentration = max(float(antibody_concentration_molar), 0.0)
-        gamma_c = self.gamma_c_nivolumab
-        ab_effective = ab_concentration / gamma_c
+        ab_effective = ab_concentration / max(self.params.gamma_c_nivolumab, 1e-9)
 
-        d_pd1_pdl1 = (
-            self.kon_pd1_pdl1 * pd1_free * pdl1_free
-            - self.koff_pd1_pdl1 * self.syn_pd1_pdl1
-            - self.internalisation * self.syn_pd1_pdl1
-        )
-        d_pd1_pdl2 = (
-            self.kon_pd1_pdl2 * pd1_free * pdl2_free
-            - self.koff_pd1_pdl2 * self.syn_pd1_pdl2
-            - self.internalisation * self.syn_pd1_pdl2
-        )
-        forward_ab = 2.0 * self.kon_pd1_ab * pd1_free * ab_effective
-        reverse_ab = self.koff_pd1_ab * self.syn_pd1_ab
-        forward_dimer = self.chi_pd1 * self.kon_pd1_ab * pd1_free * self.syn_pd1_ab
-        reverse_dimer = 2.0 * self.koff_pd1_ab * self.syn_pd1_ab_pd1
-
-        d_pd1_ab = (
-            forward_ab
-            - reverse_ab
-            - forward_dimer
-            + reverse_dimer
-            - self.internalisation * self.syn_pd1_ab
-        )
-        d_pd1_ab_pd1 = (
-            forward_dimer
-            - reverse_dimer
-            - self.internalisation * self.syn_pd1_ab_pd1
+        y0 = np.array(
+            [self.syn_pd1_pdl1, self.syn_pd1_pdl2, self.syn_pd1_ab, self.syn_pd1_ab_pd1],
+            dtype=float,
         )
 
-        self.syn_pd1_pdl1 = min(max(self.syn_pd1_pdl1 + d_pd1_pdl1 * delta_t, 0.0), self.total_pd1)
-        self.syn_pd1_pdl2 = min(max(self.syn_pd1_pdl2 + d_pd1_pdl2 * delta_t, 0.0), self.total_pd1)
-        self.syn_pd1_ab = min(max(self.syn_pd1_ab + d_pd1_ab * delta_t, 0.0), self.total_pd1)
-        self.syn_pd1_ab_pd1 = min(
-            max(self.syn_pd1_ab_pd1 + d_pd1_ab_pd1 * delta_t, 0.0),
-            self.total_pd1,
-        )
-        bound_pd1 = (
-            self.syn_pd1_pdl1
-            + self.syn_pd1_pdl2
-            + self.syn_pd1_ab
-            + 2.0 * self.syn_pd1_ab_pd1
-        )
-        if bound_pd1 > self.total_pd1 and bound_pd1 > 0.0:
-            scale = self.total_pd1 / bound_pd1
-            self.syn_pd1_pdl1 *= scale
-            self.syn_pd1_pdl2 *= scale
-            self.syn_pd1_ab *= scale
-            self.syn_pd1_ab_pd1 *= scale
+        def rhs(_, y: np.ndarray) -> np.ndarray:
+            pdl1, pdl2, ab, ab_pd1 = y
+            pd1_free = max(self.total_pd1_density - (pdl1 + pdl2 + ab + 2.0 * ab_pd1), 0.0)
+            pdl1_free = max(self.total_pdl1_density - pdl1, 0.0)
+            pdl2_free = max(self.total_pdl2_density - pdl2, 0.0)
+
+            reaction_89 = self.params.kon_pd1_pdl1 * pd1_free * pdl1_free - self.params.koff_pd1_pdl1 * pdl1
+            reaction_90 = self.params.kon_pd1_pdl2 * pd1_free * pdl2_free - self.params.koff_pd1_pdl2 * pdl2
+            reaction_91 = 2.0 * self.params.kon_pd1_ab * pd1_free * ab_effective - self.params.koff_pd1_ab * ab
+            reaction_92 = self.params.chi_pd1 * self.params.kon_pd1_ab * pd1_free * ab - 2.0 * self.params.koff_pd1_ab * ab_pd1
+
+            dpdl1 = reaction_89 - self.params.internalisation_per_day * pdl1
+            dpdl2 = reaction_90 - self.params.internalisation_per_day * pdl2
+            dab = reaction_91 - reaction_92 - self.params.internalisation_per_day * ab
+            dab_pd1 = reaction_92 - self.params.internalisation_per_day * ab_pd1
+            return np.array([dpdl1, dpdl2, dab, dab_pd1], dtype=float)
+
+        def _advance(t0: float, t1: float, state: np.ndarray, depth: int = 0) -> np.ndarray:
+            span = t1 - t0
+            if span <= 1e-12:
+                return state
+            try:
+                return integrate_local_system(
+                    rhs,
+                    state,
+                    t0,
+                    t1,
+                    solver=self.solver_config,
+                    max_internal_step_days=min(span, self.params.max_step_days),
+                )
+            except NumericsError:
+                if depth >= 6 or span <= 1e-6:
+                    raise
+                mid = t0 + 0.5 * span
+                mid_state = _advance(t0, mid, state, depth + 1)
+                return _advance(mid, t1, mid_state, depth + 1)
+
+        final = _advance(start_time, end_time, y0)
+        final = np.maximum(final, 0.0)
+        self.syn_pd1_pdl1 = float(final[0])
+        self.syn_pd1_pdl2 = float(final[1])
+        self.syn_pd1_ab = float(final[2])
+        self.syn_pd1_ab_pd1 = float(final[3])
 
     def _blocked_fraction(self) -> float:
-        if self.total_pd1 <= 0.0:
+        if self.total_pd1_density <= 0.0:
             return 0.0
-        blocked = (self.syn_pd1_ab + 2.0 * self.syn_pd1_ab_pd1) / self.total_pd1
+        blocked = (self.syn_pd1_ab + 2.0 * self.syn_pd1_ab_pd1) / self.total_pd1_density
         return min(max(blocked, 0.0), 1.0)
 
     def writeback(self, context: MutableMapping[str, float]) -> None:
-        context["syn_pd1_total"] = self.total_pd1
-        context["syn_pdl1_total"] = self.total_pdl1
-        context["syn_pdl2_total"] = self.total_pdl2
+        context["syn_pd1_total"] = self.total_pd1_density
+        context["syn_pdl1_total"] = self.total_pdl1_density
+        context["syn_pdl2_total"] = self.total_pdl2_density
         context["syn_pd1_pdl1"] = self.syn_pd1_pdl1
         context["syn_pd1_pdl2"] = self.syn_pd1_pdl2
         context["syn_pd1_apd1"] = self.syn_pd1_ab

@@ -11,6 +11,7 @@ from typing import Callable, Dict, Iterable, List, Literal, Mapping, MutableMapp
 from types import MethodType
 
 from ..snapshot import FrozenModel
+from .pd1_params import pd1_params_from_snapshot
 from .pd1_whitebox import PD1WhiteboxModel, PD1WhiteboxOutputs
 from .tcell_whitebox import TCellWhiteboxModel
 
@@ -403,6 +404,8 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
     """Alignment driver with explicit PD-1 and tumour-volume dynamics."""
 
     parameters = model.parameters or {}
+    pd1_params = pd1_params_from_snapshot(parameters)
+    solver_config = getattr(model, "_solver_config", None)
     synapse_depth_um = _resolve_synapse_depth(model)
     alignment_mode = int(parameters.get("alignment_mode", 1))
     if alignment_mode <= 0:
@@ -487,7 +490,7 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
             last_time = current_time
             volume_state = _extract_volume_l(context)
             if use_whitebox_pd1 and pd1_whitebox_model is None:
-                pd1_whitebox_model = PD1WhiteboxModel.from_context(parameters, context)
+                pd1_whitebox_model = PD1WhiteboxModel.from_context(pd1_params, context, solver_config=solver_config)
         delta_t = max(0.0, current_time - (last_time or current_time))
         last_time = current_time
 
@@ -508,7 +511,7 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
         context["pd1_whitebox_snapshot_occ"] = raw_snapshot_occ
         if use_whitebox_pd1:
             if pd1_whitebox_model is None:
-                pd1_whitebox_model = PD1WhiteboxModel.from_context(parameters, context)
+                pd1_whitebox_model = PD1WhiteboxModel.from_context(pd1_params, context, solver_config=solver_config)
             pd1_outputs: PD1WhiteboxOutputs = pd1_whitebox_model.step(conc, delta_t)
             occ_state = pd1_outputs.occupancy
             pd1_whitebox_raw_value = pd1_outputs.raw_complexes
