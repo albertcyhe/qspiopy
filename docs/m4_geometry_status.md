@@ -1,99 +1,104 @@
-# M4 动态几何对齐 — 快速入门（2025‑11‑10）
+# M4 T cell & 动态几何白盒化路线图（2025‑11‑20）
 
-本文是当前 M4（动态几何 + 医疗 PK/PD 调度）状态的自包含说明，适合刚接手的同学快速了解「已经完成的」「如何复现实验」「尚待解决的问题」以及「下一步优先级」。
+PD‑1 子系统已经照 stiff solver 模板完成白盒迁移（probe → diff → clean export）。接下来我们要用同一套流程，把 T cell 激活/增殖反应以及 tumour geometry follower 也搬进白盒世界，最终让 `alignment_driver_block` 只负责 orchestrate，而非承载任何灰盒逻辑。
 
 ---
 
-## 1. 当前进度概览
+## 1. 全局视角
 
-| 模块 | 状态 | 备注 |
+| 领域 | 当前状态 | 下一步 |
 | --- | --- | --- |
-| **几何实时模块** | ✅ | `tumour_geometry_dynamic_block` 已更新为直接使用 `context['tumour_volume_l']` / `context['V_T']` 作为基线，再叠加 live/T-cell/dead 滤波体积；自动识别 `vol_cell` 单位，并在 `--dump-flat-debug` 下输出 `geom_*` 诊断键。 |
-| **模块注入策略** | ✅ | 自 2025‑11‑13 起，A 系列 CLIs 默认启用 `alignment_driver_block`（白盒 PK / PD‑1 / 几何 ODE）。旧的 `pd1_bridge_block`、`tumour_geometry_dynamic_block` 仍可通过 `--module-block` 明确指定，用于 debug 与回归。 |
-| **CLI 诊断** | ✅ | `scripts/validate_surrogate.py` / `--emit-diagnostics` / `--dump-flat-debug` 已覆盖 snapshot & target-volume 两种初始化模式。 |
-| **对白盒 PD‑1 的依赖** | 🔄 | Alignment driver 的 PD‑1 子模块已改为显式 kon/koff/k_int ODE，但默认参数与训练曲线差异仍大；需要结合 PD‑1 白盒的最新进展一起调参。 |
+| PD‑1 synapse | ✅ 已和 SimBiology ODE 对齐 (`dev_pd1_training_probe.m` + `dev_pd1_probe_diff.py`)，可导出干净训练集 (`export_pd1_clean_training.py`)。 | 作为模板指导 T cell / 几何白盒化。 |
+| T cell 驱动 | ⚠️ 基础设施已到位：`dev_tcell_probe.m` + `dev_tcell_probe_diff.py` 可获取/对比 MATLAB 轨迹，`tcell_whitebox.py` 已接入 stiff solver 并加载 snapshot 参数，但首次 diff RMSE（density≈8e10、Tumor_T1≈1e8）仍远超目标。 | 以 probe diff 为 tight loop 调整 Reaction 14–27 RHS 和参数，压低 RMSE，再接入 runtime。 |
+| 几何 / Volume | ⚠️ `tumour_geometry_dynamic_block` 仍是 logistic + 滤波组合，`tumour_volume_l`、`tcell_density_per_ul` RMSE 大。 | 把几何 ODE 写成 `geometry_whitebox.py`，与 T cell ODE 共用 stiff solver。 |
+| Exporter 语义 | ⚠️ 已用 `scripts/dump_snapshot_semantics.py --keyword T1 --keyword V_T` 验证 Reaction 5–27 / volume 规则存在，但遇到缺项仍需补 MATLAB exporter。 | 保持快照完整；几何白盒动工前再覆核一次。 |
+| CLI/诊断 | ✅ `scripts/validate_surrogate.py --emit-diagnostics --dump-flat-debug` 可提供所有上下文信号。 | 白盒模块接入后继续用它衡量 A‑series 数值门。 |
 
 ---
 
-## 2. 关键资产
+## 2. 关键资产 / 参考
 
-| Path / 命令 | 用途 |
+| 资产 | 说明 |
 | --- | --- |
-| `src/offline/modules/switches.py` (`tumour_geometry_dynamic_block`) | 减缓肿瘤体积、伪进展滤波、T cell density 计算。 |
-| `scripts/validate_surrogate.py` | 主 CLI。`--module-block ...` 控制是否启用旧几何模块，`--emit-diagnostics` + `--dump-flat-debug 5` 输出对齐所需数据。 |
-| `artifacts/matlab_frozen_model/example1/parameters.csv` | 参考的 `k_cell_clear`, `vol_cell`, `vol_Tcell` 等几何常数。 |
-| `docs/alignment_tuning_plan.md` | 更上层的调参路线（与 PD‑1 / 几何位置关系）。 |
+| `matlab/scripts/dev_pd1_training_probe.m` / `scripts/dev_pd1_probe_diff.py` | PD‑1 probe/diff 模板；T cell 版已经落地为 `dev_tcell_probe.m` / `dev_tcell_probe_diff.py`，几何后续照此实现。 |
+| `scripts/export_pd1_clean_training.py` | 证明“clean ODE 训练集”可行，后续可仿造出 `export_tcell_clean_training.py` / `export_geometry_clean_training.py`。 |
+| `docs/tcell_driver_plan.md` | 描述 surrogate vs MATLAB 的 T cell 行为差异，为白盒化提供背景。 |
+| `scripts/dump_snapshot_semantics.py` + `matlab/scripts/show_alignment_drivers.m` | 用来确认 Reaction 14–27、几何规则是否被 exporter 完整写到 snapshot。 |
+| `src/offline/stiff_ode.py` | 统一的 solver glue；T cell/geometry 白盒直接复用。 |
 
 ---
 
-## 3. 如何复现当前结果
+## 3. 历史坑 / 教训
 
-### 3.1 Snapshot 路径
+1. **legacy parquet ≠ ODE**  
+   - PD‑1 阶段我们已经确认：`artifacts/training/pd1_whitebox_training.parquet` 中的 state/`pd1_inhibition` 是经过 MATLAB 端的后处理（clip/filter）；直接拿来作为 RMSE 硬目标会逼着白盒去复刻旧 hack。  
+   - 对 T cell/几何必须一开始就明确：只用 probe CSV 和 clean exporter 来做物理对齐，legacy CSV 仅用于回归或 sanity check。
+2. **单位 / 深度转换**  
+   - PD‑1 曾经把 `kon` 多乘了 `86400` / `1e3`，导致 flux 相差 10⁵。T cell/volume 的 `vol_cell`, `k_T1_*`, `geom_*` 同样需要对照 `equations.txt` 和 `parameters.csv` 仔细转换，避免重复踩坑。
+3. **Exporter 漏项**  
+   - 若 snapshot 缺某条 ODE（例如 `V_T` 只是 repeated assignment），Python 白盒就算写出来也没法初始化/写回。必须在写代码前先跑 `scripts/dump_snapshot_semantics.py` 确认所有反应、规则、事件都能从 snapshot 获得；若没有，先补 MATLAB exporter 再开工。
+4. **求解器参数复用**  
+   - stiff solver 的 `max_step_days/rtol/atol` 已经在 PD‑1 上验证，不要在 T cell/geometry 模块里另起炉灶或擅自调小步长，否则 A-series CLI 运行会再次出现“多重 solver 配置”导致的难以 debug 行为。
+5. **诊断信号**  
+   - 过去 PD‑1 调试时忘记在 context 写回中间量，导致 `--dump-flat-debug` 看不到 state；本次 T cell/geometry 白盒要确保 `writeback` 中写出全部 observable（如 `tcell_density_per_ul`, `geom_volume_*`），以便 CLI/metrics 使用。
 
-```
+---
+
+## 3. 行动计划
+
+### Step A — 梳理方程与参数
+1. 用 `scripts/dump_snapshot_semantics.py artifacts/matlab_frozen_model/example1 --keyword T1 --keyword nT1 --keyword V_T` 提取 T cell、几何相关的 ODE / 规则 / 事件。
+2. 把所有常数（`k_T1_act`, `k_T1_pro`, `q_T1_*`, `geom_growth_per_day`, `vol_cell` 等）收集进新的 dataclass（`TCellParams`, `GeometryParams`），并确认 snapshot 中存在对应条目；若没有，补 exporter。
+3. 明确 observable 定义：`tcell_density_per_ul`, `tumour_volume_l`, 以及任何组合信号（伪进展指数、死亡体积）都要写明公式。
+
+### Step B — MATLAB probe
+1. ✅ 已完成：`matlab/scripts/dev_tcell_probe.m` 已可导出 `nT1/aT1/T1/T_exh` + `H_PD1_C1` + finite diff，样例输出见 `artifacts/dev/tcell_probe_pd1_train_0004.csv`。
+2. 同理准备 `dev_geometry_probe.m`（如果 `V_T` 由复杂规则驱动）。输出 tumour volume、live/dead/T cell volume、几何滤波信号；Python 侧已有 `scripts/dev_geometry_probe_diff.py` 可复用 PD‑1/T cell 的 diff 体验。
+
+### Step C — Python diff + 白盒模块
+1. ✅ 已完成初版：`src/offline/modules/tcell_whitebox.py` 已加载 snapshot 参数并接入 stiff solver，但 RHS 仍需按 probe diff 校正，单测框架待补。
+2. ✅ `scripts/dev_tcell_probe_diff.py` 已上线（支持 `--estimate-density-scale` 输出 `tcell_density_scale` 校准因子）；当前 `pd1_train_0004` RMSE 仍在 1e8 量级，需据此调整 ODE 直到降至 <5e‑2。
+3. 对几何模块重复上一步：`geometry_whitebox.py` + `scripts/dev_geometry_probe_diff.py`，保证 `tumour_volume_l`、`geom_volume_smoothed_l`、`tcell_density_per_ul` 的物理一致。
+
+### Step D — Runtime 接入
+1. 在 `alignment_driver_block` 中替换 T cell follower → `TCellWhiteboxModel`，几何 follower → `GeometryWhiteboxModel`。保持与 PD‑1 白盒相同的构造方式（`from_context`, `step`, `writeback`）。
+2. CLI 验证：`python -m scripts.validate_surrogate --scenarios A1 --ic-mode snapshot --emit-diagnostics --dump-flat-debug 5 --module-block alignment_driver_block`. 关注 `pd1_occupancy`, `tcell_density_per_ul`, `tumour_volume_l` 的 RMSE 是否显著下降。
+3. 若 solver 行为稳定，再扩展到 A2–A6，记录 `artifacts/validation/metrics.csv` 中的变化。
+
+### Step E — 数据/文档
+1. 决定是否需要干净的 T cell/几何训练集：如果要拟合，就仿照 PD‑1 写 clean exporter 并生成 parquet。
+2. 更新 `docs/new_alignment_plan.md` / `docs/project_handoff.md`：标记 PD‑1 完成、T cell/几何正在白盒化；把 “training parquet RMSE <1e‑2” 归档到 optional/backlog。
+3. 维护 `docs/tcell_driver_plan.md`：记录 probe diff 结果、参数调优记录。
+
+---
+
+## 4. MATLAB / 生物团队需确认
+
+1. **参数来源**：`k_T1_act`, `k_T1_pro`, `geom_*` 是否已有权威值？请在 snapshot `parameters.csv` 中补齐，避免 Python 端 hardcode。
+2. **Observable 计算**：`tcell_density_per_ul`, `tumour_volume_l` 在 MATLAB 端是否经过额外几何缩放或滤波？请提供公式以免白盒输出错位。
+3. **Exporter 补丁**：若 `V_T` 或 `T` 相关的 ODE/规则未导出，请提供脚本改动，确保 snapshot → Python 的方程闭环。
+
+---
+
+## 5. 参考命令
+
+```bash
+# Probe + diff（PD‑1 示例，T cell/几何照抄）
+/Volumes/AlbertSSD/Applications/MATLAB_R2023b.app/bin/matlab -batch \
+  "cd('/Volumes/AlbertSSD/Program/new/qspiopy'); addpath(fullfile(pwd,'matlab','scripts')); \
+   dev_pd1_training_probe('pd1_train_0004');"
+python scripts/dev_pd1_probe_diff.py artifacts/dev/pd1_training_probe_pd1_train_0004.csv
+
+# T cell probe + diff（已落地）
+/Volumes/AlbertSSD/Applications/MATLAB_R2023b.app/bin/matlab -batch \
+  "cd('/Volumes/AlbertSSD/Program/new/qspiopy'); addpath(fullfile(pwd,'matlab','scripts')); \
+   dev_tcell_probe('pd1_train_0004');"
+python scripts/dev_tcell_probe_diff.py artifacts/dev/tcell_probe_pd1_train_0004.csv
+
+# Alignment driver 快速验证
 python -m scripts.validate_surrogate --scenarios A1 --ic-mode snapshot \
-  --emit-diagnostics --numeric-gates \
-  --module-block pd1_bridge_block \
-  --module-block pd1_occupancy_filter_block \
-  --module-block tumour_geometry_dynamic_block \
-  --dump-flat-debug 5
+  --module-block alignment_driver_block \
+  --emit-diagnostics --dump-flat-debug 5 --max-rel-err 1e12
 ```
 
-关键指标（目前仍不合格）：
-
-| Observable | rel‑L2 | maxRE | 备注 |
-| --- | --- | --- | --- |
-| `tumour_volume_l` | ≈ 7.9e‑1 | ≈ 1.27 | 基线 1.4e‑2 L，但下行趋势与 MATLAB 差异大。 |
-| `tcell_density_per_ul` | ≈ 6.1 | ≈ 3.2e+1 | 需要使用 `V_T.T*` 聚合或额外驱动。 |
-| `pd1_occupancy` | ≈ 1.0 | ≈ 5.6e3 | `pd1_occupancy_filter_block` 现为「当前 Hill 输出」，尚未调成 MATLAB 的延迟滤波。 |
-
-### 3.2 Target-volume 初始化
-
-```
-python -m scripts.validate_surrogate --scenarios A1 --ic-mode target_volume \
-  --ic-target-diam-cm 0.05 --ic-max-days 400 --ic-max-wall-seconds 60 \
-  --emit-diagnostics --numeric-gates \
-  --module-block pd1_bridge_block \
-  --module-block tumour_geometry_dynamic_block \
-  --dump-flat-debug 5
-```
-
-- 0.5 cm / 150 d 的默认 IC 无法在时限内收敛；改为 0.05 cm / 400 d 可以完成，但仿真输出仍近似水平（`tumour_volume_l ≈ 1.78e-4 L`，`tcell_density_per_ul ≈ 4e5`），数值门依旧超标。
-
----
-
-## 4. 当前阻塞
-
-1. **PD‑1 占有率**  
-   alignment driver 的 PD‑1 ODE 未能复现 MATLAB 的缓慢爬升（rel‑L2≈O(1)）。需要配合 PD‑1 白盒 fitter 调整 `kon/koff` 缩放、`PD1_50`、滤波时间常数。
-2. **肿瘤体积 / T cell density**  
-   几何 follower 的 logistic 参数沿用默认值，导致 volume / density 在数天内剧烈震荡。需要重新估计 `geom_growth_per_day`, `geom_kill_per_cell_per_day`, `geom_volume_cap_l` 等参数，或直接从 MATLAB 导出等效 ODE。
-3. **Exporter 语义不完整**  
-   若 MATLAB snapshot 中 `V_T` 通过 repeated assignments 直接写入（而非 ODE），则 Python 的白盒路径无法独立演化，需要补全导出的方程或额外 metadata。
-
----
-
-## 5. 需要 MATLAB 同步的信息
-
-1. **几何参数的真实值**  
-   `k_cell_clear`, `vol_cell`, `vol_Tcell`, `geom_*` 等是否有明确来源？请在 MATLAB 导出前写入 snapshot（`parameters.csv`），让 Python 自动拾取。
-2. **PD‑1 占有率是否有额外延迟/事件**  
-   如果 `H_PD1` 的滤波依赖其它变量（例如 tumour volume, surface area scaling），请提供公式/事件描述，便于 Python 模块复现。
-3. **初始条件**  
-   如果 MATLAB 参考曲线的体积/密度不是从 `V_T` 直接读取，需要明确“真实输出”是哪个变量，以便 Python 端取用一致的 observable。
-
----
-
-## 6. 下一步（按优先级）
-
-1. **调 `pd1_occupancy_filter_block`**  
-   - 读取 MATLAB 的 `H_PD1` 曲线，拟合滤波参数（`tau`, `delay`, `PD1_50`）。  
-   - 目标：`pd1_train_0004`/`0582` 的 `H_RMSE < 1e-2`（与 PD‑1 白盒同一验证逻辑）。
-2. **重新估计几何参数**  
-   - 从 MATLAB 模型或文献获得 `geom_*` 建议值，并更新 `parameters/example1_parameters.json`。  
-   - 通过 `scripts/validate_surrogate.py --emit-diagnostics` 验证 volume / density RMSE 是否下降。
-3. **Exporter 补全**  
-   - 确认 MATLAB ODE 是否完整导出；若没有，则增补 exporter 使 Python 可独立运行。  
-   - 根据结果调整 `alignment_driver_block` 逻辑，并决定何时完全切换到纯 snapshot 模式。
-
-完成上述三项后，再回到 `scripts/dev_pd1_driver_compare.py` / `scripts.validate_surrogate --scenarios A1…A6`，观察全部 observable 是否满足数值门，然后更新 `docs/test_status.md`。
+遵循以上步骤，T cell 与动态几何模块都会像 PD‑1 一样进入 stiff solver 白盒体系；届时 `alignment_driver_block` 只需做模块拼装，灰箱调参历史问题也将随之消失。

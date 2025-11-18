@@ -13,6 +13,7 @@ from types import MethodType
 from ..snapshot import FrozenModel
 from .pd1_params import pd1_params_from_snapshot
 from .pd1_whitebox import PD1WhiteboxModel, PD1WhiteboxOutputs
+from .geometry_whitebox import GeometryWhiteboxModel
 from .tcell_whitebox import TCellWhiteboxModel
 
 logger = logging.getLogger(__name__)
@@ -438,6 +439,8 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
         or float(parameters.get("V_Tmin", 0.0)) * 1e-6,
         1e-9,
     )
+    geometry_whitebox = alignment_mode >= 2 or bool(parameters.get("geometry_alignment_use_whitebox", 0.0))
+    geometry_whitebox_model: Optional[GeometryWhiteboxModel] = None
 
     schedule_source = None
     schedule: List[Tuple[float, float]] = []
@@ -524,15 +527,26 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
                 occ_state = min(max(occ_state + d_occ * delta_t, occ_floor), occ_ceiling)
             context["pd1_whitebox_complex_density"] = float(context.get("syn_pd1_pdl1", 0.0))
 
-        if volume_state is None:
-            volume_state = _extract_volume_l(context)
-        eff_cells = max(float(context.get("V_T.T1", 0.0)), 0.0)
-        if delta_t > 0.0:
-            growth = grow_rate * volume_state * (1.0 - volume_state / volume_cap)
-            kill = kill_coeff * eff_cells
-            volume_state = max(volume_state + (growth - kill) * delta_t, min_volume_l)
-
-        vt_microliter = volume_state * 1e6
+        if geometry_whitebox:
+            if geometry_whitebox_model is None:
+                geometry_whitebox_model = GeometryWhiteboxModel.from_context(
+                    parameters,
+                    context,
+                    solver_config=solver_config,
+                )
+            geometry_whitebox_model.step(context, delta_t, occ_state)
+            volume_state = float(context.get("tumour_volume_l", context.get("V_T", min_volume_l)))
+        else:
+            if volume_state is None:
+                volume_state = _extract_volume_l(context)
+            eff_cells = max(float(context.get("V_T.T1", 0.0)), 0.0)
+            if delta_t > 0.0:
+                growth = grow_rate * volume_state * (1.0 - volume_state / volume_cap)
+                kill = kill_coeff * eff_cells
+                volume_state = max(volume_state + (growth - kill) * delta_t, min_volume_l)
+            context["tumour_volume_l"] = volume_state
+            context["tumor_volume_l"] = volume_state
+            context["V_T"] = volume_state * 1e6
 
         if not use_whitebox_pd1:
             context["aPD1"] = conc
@@ -544,10 +558,6 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
         context["pd1_alignment_concentration_M"] = conc
         context["pd1_alignment_volume_l"] = volume_state
         context["pd1_whitebox_raw_occ"] = pd1_whitebox_raw_value
-
-        context["tumour_volume_l"] = volume_state
-        context["tumor_volume_l"] = volume_state
-        context["V_T"] = vt_microliter
 
         radius_cm = ((3.0 * volume_state * 1e3) / (4.0 * math.pi)) ** (1.0 / 3.0)
         context["tumour_diameter_cm"] = 2.0 * radius_cm
