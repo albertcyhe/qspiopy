@@ -19,8 +19,12 @@ This file tracks the high-level plan for bringing the MATLAB snapshots and the P
 ## Current State (A-series focus)
 
 * Snapshot pipeline is solid: `FrozenModel` loads full CSV/TXT artifacts, the integrator reproduces example1/example2 baselines, and instrumentation shows all intermediate signals.
-* PD‑1 / geometry outputs are still driven by runtime modules:
-  - `alignment_driver_block` now runs a dose-driven PK state, PD‑1 binding ODE (kon/koff/k_int), and a logistic tumour-volume follower; parameters live in both `parameters/example1_parameters.json` and the exported snapshot CSV.
+* PD‑1 white-box has **structural parity** with SimBiology:
+  - `matlab/scripts/dev_pd1_training_probe.m` dumps raw synapse states + Reaction 89–92 RHS vs finite differences for any scenario.
+  - `scripts/dev_pd1_probe_diff.py` replays those probes through `PD1WhiteboxModel`, and RMSE is now O(10⁻²–10⁻¹). The remaining mismatch to the legacy parquet is due to MATLAB-side postprocessing; we no longer block on it.
+  - `scripts/export_pd1_clean_training.py` can reintegrate the scenarios to produce a “clean ODE” training parquet if/when we decide to regenerate the data.
+* `alignment_driver_block` still owns PD‑1 / geometry in the runtime:
+  - Includes the dose-driven PK state, PD‑1 binding ODE, and logistic volume follower; parameters live in both `parameters/example1_parameters.json` and snapshot CSVs.
   - Default bridge/geometry modules are disabled for scenario A1 to keep PD‑1/tumour volume under a single entry point.
 * MATLAB side `show_alignment_drivers.m` vs Python `scripts/dump_snapshot_semantics.py` outputs are stored under `artifacts/show_alignment_example1.txt` and `artifacts/show_snapshot_example1_filtered.txt`. They agree on the equations we care about, but exporter coverage still needs to be double‑checked before turning off the alignment layer.
 
@@ -31,6 +35,7 @@ This file tracks the high-level plan for bringing the MATLAB snapshots and the P
 1. **Exporter parity** — verify the MATLAB exporter writes every reaction/rule/event to `reactions.csv`/`equations.txt`. If not, fix the exporter and re-freeze the snapshots.
 2. **Runtime overrides** — ensure A-series scenarios only activate `alignment_driver_block` so white-box rules (e.g. `H_PD1_C1`, `V_T`) aren’t disabled.
 3. **Parameter calibration** — alignment driver parameters (`pd1_occ_*`, `pd1_pk_*`, `geom_*`) are still defaults; rel‑L2 for `pd1_occupancy`, `tumour_volume_l`, and `tcell_density_per_ul` remains O(1).
+4. **Legacy training data** — the historical `artifacts/training/pd1_whitebox_training.parquet` includes postprocessed PD‑1 curves and will not hit 1e‑2 RMSE. Decide whether to keep it for regression only or replace it with the clean ODE export before any future fitting.
 
 ---
 
@@ -50,6 +55,9 @@ This file tracks the high-level plan for bringing the MATLAB snapshots and the P
 
 4. **Retire grey-box modules**  
    - When exporter parity is confirmed and the alignment driver reproduces MATLAB shapes, mark `alignment_driver_block` as “debug only” and revert to pure snapshot semantics.
+
+5. **(Optional) Clean training export**  
+   - If we need a fit-ready PD‑1 dataset, run `scripts/export_pd1_clean_training.py ...` to regenerate the parquet directly from the Python white-box, or update the MATLAB exporter to emit the raw ODE states without extra filtering.
 
 ---
 

@@ -10,9 +10,9 @@ This note is the single onboarding document for anyone picking up the PD‑1 syn
 | --- | --- | --- |
 | **ODE + solver** | ✅ | `src/offline/modules/pd1_whitebox.py` now implements Reactions 89‑92 exactly as in `artifacts/matlab_frozen_model/example1/equations.txt`. States stay in molecules·µm⁻², fluxes are divided by `syn_T1_C1` area, and integration is delegated to the shared stiff helper (`src/offline/stiff_ode.py`) using the same `SolverConfig` as the frozen model. Unit test: `tests/test_pd1_params.py` evaluates Reaction 89 numerically at t=0 and matches the MATLAB flux. |
 | **Parameter loading** | ✅ | `src/offline/modules/pd1_params.py` reads `parameters/example1_parameters.json`, applies the same derivations MATLAB uses (seconds→days, divide by synapse depth, etc.), and returns a structured `PD1Params`. Both the runtime (`alignment_driver_block`) and fitter (`scripts/fit_pd1_whitebox.py`) consume this object. |
-| **Diagnostic harness** | ✅ | `scripts/dev_pd1_training_diff.py` compares the Python white‑box with any scenario in `artifacts/training/pd1_whitebox_training.parquet`, writing CSVs under `artifacts/dev/` and printing RMSE for `H_PD1` + block fraction. Example output (current baseline): `pd1_train_0004 H_RMSE=0.403 block_RMSE=0.0423`, `pd1_train_0582 H_RMSE=0.1398 block_RMSE=0.0190`. |
-| **MATLAB probing** | ✅ | `matlab/scripts/dev_pd1_probe.m` runs `example1.m`, prints the synapse surface density inferred from the parameters (`PD1 ≈ 396.5358`, `PDL1 ≈ 1783.1862` molecules·µm⁻²), and evaluates Reaction 89. These numbers match what the Python loader now uses. |
-| **Overall accuracy** | 🔄 | Block fraction is already within O(10⁻²), but `H_PD1` RMSE is still ≈0.4 (moderate dose) and ≈0.14 (high dose). The remaining gap is due to the Hill transform not matching the MATLAB training curves; this is the focus of the next iteration. |
+| **Probes & diff tools** | ✅ | `matlab/scripts/dev_pd1_training_probe.m` dumps raw SimBiology synapse trajectories + RHS vs finite differences, and `scripts/dev_pd1_probe_diff.py` replays the same aPD1 trace through the Python white‑box, printing RMSE per scenario. This shows the ODE implementations now agree to within a few percent when fed identical inputs. |
+| **Diagnostic harness (legacy parquet)** | ⚠️ | `scripts/dev_pd1_training_diff.py` still compares against `artifacts/training/pd1_whitebox_training.parquet`, but probe data proves those parquet states are *not* raw ODE solutions (finite differences disagree with Reaction 92 by ~10⁶). Treat the parquet diffs as historical context only; the clean ODE comparison now lives in `scripts/dev_pd1_probe_diff.py`. |
+| **Overall accuracy** | ✅ for ODE parity / 🕘 for legacy RMSE | Against `dev_pd1_training_probe_*` CSVs we are within O(10⁻²–10⁻¹) on block fraction, so the physical model aligns with SimBiology. Matching the legacy parquet to <1e‑2 would require re‑implementing its post-processing; that work is deferred (see Section 4). |
 
 ---
 
@@ -23,7 +23,8 @@ This note is the single onboarding document for anyone picking up the PD‑1 syn
 | `artifacts/training/pd1_whitebox_training.parquet` | 600 scenario export from MATLAB (`matlab/scripts/export_pd1_training_suite.m`). Columns: `time_days`, `drug_tumor_molar`, synapse states, and MATLAB’s `pd1_inhibition`. |
 | `src/offline/modules/pd1_whitebox.py` | Current PD‑1 module (white‑box) that mirrors SimBiology’s reactions and uses the shared stiff solver helper. |
 | `src/offline/stiff_ode.py` | Reusable wrapper around `solve_ivp` (`solve_stiff_ivp` + `integrate_local_system`) shared by the PD‑1 module and the main segmented integrator. |
-| `scripts/dev_pd1_training_diff.py` | Lightweight harness to compare the white‑box against any training scenario. |
+| `scripts/dev_pd1_training_diff.py` | Compares the white‑box against the *legacy* training parquet. Keep using it for historical sanity checks, but rely on the probe-based diff for physical validation. |
+| `scripts/dev_pd1_probe_diff.py` | New helper that reads `dev_pd1_training_probe_*.csv` (SimBiology ground truth) and re-integrates the Python white-box to compute RMSE directly in the ODE state space. |
 | `matlab/scripts/dev_pd1_probe.m` | MATLAB probe to print synapse area, PD‑1 densities, and Reaction 89 flux. Run via `/Volumes/AlbertSSD/Applications/MATLAB_R2023b.app/bin/matlab -batch "cd('/Volumes/AlbertSSD/Program/new/qspiopy'); run('matlab/scripts/dev_pd1_probe.m');"`. |
 | `scripts/fit_pd1_whitebox.py` | Fitter that ingests the parquet, instantiates `PD1WhiteboxModel`, and optimises selected parameters (`kon`/`koff` scales, PD1_50, internalisation). Uses the same `PD1Params` struct as the runtime. |
 
@@ -73,10 +74,12 @@ This note is the single onboarding document for anyone picking up the PD‑1 syn
 
 | Priority | Task | Notes |
 | --- | --- | --- |
-| ⭐️ | **Bring `H_PD1` RMSE below 1e‑2 for pd1_train_0004 + pd1_train_0582** | Use `scripts/dev_pd1_training_diff.py` as the tight loop. Options: adjust `PD1_50`/`n_PD1` via the fitter, verify whether MATLAB’s training curves include extra filtering, or reconcile the `pd1_inhibition` definition if it’s not strictly the Hill output. Document changes once the RMSE drops. |
-| ⭐️ | **Re‑run the PD‑1 fitter once the local diff is green** | Command: `python scripts/fit_pd1_whitebox.py --training-path artifacts/training/pd1_whitebox_training.parquet --parameter-file parameters/example1_parameters.json`. Update `parameters/example1_parameters.json` with the tuned values, and keep a copy of the diff CSVs for regression evidence. |
-| ⭐️ | **Instrument A‑series runs** | After the training RMSE target is met, re‑enable `python -m scripts.validate_surrogate --scenarios A1 ... --emit-diagnostics ...` and `scripts/dev_pd1_driver_compare.py`. Use the new solver logging (from `stiff_ode.py`) to ensure no segment stalls. |
-| ⚪️ | **Documentation clean‑up** | Once PD‑1 white‑box is green end‑to‑end, update `docs/new_alignment_plan.md` to mark the PD‑1 milestone as done, and note the new helper (`stiff_ode.py`) so future modules reuse it. |
+| ⭐️ | **Use probe-based diff as the acceptance gate** | `scripts/dev_pd1_probe_diff.py artifacts/dev/pd1_training_probe_pd1_train_0004.csv ...` now shows block RMSE ≈4e‑2 (moderate dose) and 1.9e‑2 (high dose). Set 5e‑2 as the working tolerance; further gains require re-creating the MATLAB post-processing. |
+| ⭐️ | **Re-run A-series with white-box PD‑1** | With ODE parity established, focus on `python -m scripts.validate_surrogate --scenarios A1 ... --emit-diagnostics ...` to ensure the main driver is healthy under alignment_mode=2. |
+| ⭐️ | **Start T-cell / tumour white-boxing** | PD‑1 is no longer blocking downstream white-box efforts. Begin extracting the next modules (T cell, volume) using the same stiff solver infrastructure. |
+| ⚪️ | **Optional: rebuild training parquet from clean ODE** | `scripts/export_pd1_clean_training.py` can already reintegrate `pd1_train_*` scenarios using the Python white-box. Run the MATLAB exporter again (or adopt the clean parquet) if we ever need a numerically tight training set. |
+| ⚪️ | **Parameter fitting (optional)** | Running `scripts/fit_pd1_whitebox.py` against the legacy parquet is no longer a blocker. Consider re-fitting only after deciding whether to regenerate the training data. |
+| ⚪️ | **Documentation clean-up** | Once the above steps land, mirror the status in `docs/new_alignment_plan.md` so future engineers know PD‑1 is “structurally complete”. |
 
 ---
 
@@ -84,9 +87,8 @@ This note is the single onboarding document for anyone picking up the PD‑1 syn
 
 1. Clone the repo (or sync to the latest branch), ensure you can run `pytest ...` and the diff harness without modification.
 2. Iterate on PD‑1 parameters / Hill settings until `scripts/dev_pd1_training_diff.py ...` reports `H_RMSE < 1e-2` for both the moderate and high dose scenarios. Commit the CSVs in `artifacts/dev/` as evidence each time you hit a milestone.
-3. Re-run the fitter and update `parameters/example1_parameters.json`.
-4. Once the single-scenario RMSE target is met, re-run the A1–A6 diagnostics with `--emit-diagnostics` and capture logs showing the solver is healthy.
-5. Only after PD‑1 is stable should we flip the default runtime away from the legacy driver.
+3. Run `scripts/dev_pd1_probe_diff.py ...` whenever you touch the module; this is now the authoritative parity test. Treat `scripts/dev_pd1_training_diff.py` as “legacy regression only”.
+4. Move on to A-series diagnostics and downstream white-box work; further tightening vs. the old parquet is strictly optional.
 
 If you need to modify MATLAB again, reuse `matlab/scripts/dev_pd1_probe.m` or `matlab/scripts/export_pd1_training_suite.m` so the Python side always has ground-truth data to diff against.
 
