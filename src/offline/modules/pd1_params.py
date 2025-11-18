@@ -11,6 +11,8 @@ from typing import Dict, Mapping, MutableMapping, Optional, Tuple
 from ..units import convert_area, convert_length
 
 SECONDS_PER_DAY = 86400.0
+AVOGADRO = 6.02214076e23
+DEFAULT_SYN_DEPTH_NM = 3.0
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,7 @@ class PD1Params:
     max_step_days: float
     solver_rtol: float
     solver_atol: float
+    surface_density_to_molar: float
 
     def pd1_surface_density(self) -> float:
         area = max(self.tcell_area_um2, 1e-6)
@@ -150,11 +153,11 @@ def load_pd1_parameters_from_entries(entries: Mapping[str, Dict[str, object]]) -
     kd_pd1_pdl1_u = _entry_units(entries, "kd_PD1_PDL1")
     kd_pd1_pdl2_u = _entry_units(entries, "kd_PD1_PDL2")
 
-    kon_pd1_pdl1 = k_pd1_pdl1 * SECONDS_PER_DAY / (max(d_syn_nm, 1e-9) * 1e3)
-    kon_pd1_pdl2 = k_pd1_pdl2 * SECONDS_PER_DAY / (max(d_syn_nm, 1e-9) * 1e3)
+    kon_pd1_pdl1 = k_pd1_pdl1 / max(d_syn_nm, 1e-9)
+    kon_pd1_pdl2 = k_pd1_pdl2 / max(d_syn_nm, 1e-9)
 
-    koff_pd1_pdl1 = k_pd1_pdl1 * kd_pd1_pdl1 * SECONDS_PER_DAY
-    koff_pd1_pdl2 = k_pd1_pdl2 * kd_pd1_pdl2 * SECONDS_PER_DAY
+    koff_pd1_pdl1 = k_pd1_pdl1 * kd_pd1_pdl1
+    koff_pd1_pdl2 = k_pd1_pdl2 * kd_pd1_pdl2
 
     k_pd1_ab = _entry_value(entries, "kon_PD1_aPD1")
     kd_pd1_ab = _entry_value(entries, "kd_PD1_aPD1")
@@ -170,6 +173,8 @@ def load_pd1_parameters_from_entries(entries: Mapping[str, Dict[str, object]]) -
 
     tcell_area = _surface_area(entries, "A_Tcell", "D_Tcell")
     cell_area = _surface_area(entries, "A_cell", "D_cell")
+    # Convert surface density (molecules/µm^2) to molarity (mol/L) using synapse depth.
+    surface_density_to_molar = (1e15 / AVOGADRO) / max(d_syn_um, 1e-9)
 
     return PD1Params(
         kon_pd1_pdl1=kon_pd1_pdl1,
@@ -193,17 +198,26 @@ def load_pd1_parameters_from_entries(entries: Mapping[str, Dict[str, object]]) -
         max_step_days=max(float(max_step), 1e-8),
         solver_rtol=max(float(solver_rtol), 1e-12),
         solver_atol=max(float(solver_atol), 1e-18),
+        surface_density_to_molar=float(surface_density_to_molar),
     )
 
 
 def pd1_params_from_snapshot(parameters: Mapping[str, float]) -> PD1Params:
+    chi_derived = float(parameters.get("Chi_PD1", parameters.get("chi_PD1", 0.0)) or 0.0)
+    raw_chi_value = float(parameters.get("chi_PD1_raw", 10.0))
+    if chi_derived > 0.0 and raw_chi_value > 0.0:
+        d_syn_nm = raw_chi_value / chi_derived
+    else:
+        d_syn_nm = DEFAULT_SYN_DEPTH_NM
+    d_syn_um = d_syn_nm / 1000.0
+    surface_density_to_molar = (1e15 / AVOGADRO) / max(d_syn_um, 1e-9)
     return PD1Params(
         kon_pd1_pdl1=float(parameters.get("kon_PD1_PDL1", 0.0)),
         kon_pd1_pdl2=float(parameters.get("kon_PD1_PDL2", 0.0)),
-        kon_pd1_ab=float(parameters.get("kon_PD1_aPD1", 0.0)),
+        kon_pd1_ab=float(parameters.get("kon_PD1_aPD1", 0.0)) * SECONDS_PER_DAY,
         koff_pd1_pdl1=float(parameters.get("koff_PD1_PDL1", 0.0)),
         koff_pd1_pdl2=float(parameters.get("koff_PD1_PDL2", 0.0)),
-        koff_pd1_ab=float(parameters.get("koff_PD1_aPD1", 0.0)),
+        koff_pd1_ab=float(parameters.get("koff_PD1_aPD1", 0.0)) * SECONDS_PER_DAY,
         chi_pd1=float(parameters.get("Chi_PD1", 0.0)),
         internalisation_per_day=float(parameters.get("pd1_occ_internalization_per_day", 0.0)),
         smoothing_tau_days=float(parameters.get("pd1_whitebox_tau_days", 0.0)),
@@ -219,6 +233,7 @@ def pd1_params_from_snapshot(parameters: Mapping[str, float]) -> PD1Params:
         max_step_days=float(parameters.get("pd1_whitebox_max_step_days", 1e-4) or 1e-4),
         solver_rtol=float(parameters.get("pd1_whitebox_rtol", 1e-6) or 1e-6),
         solver_atol=float(parameters.get("pd1_whitebox_atol", 1e-9) or 1e-9),
+        surface_density_to_molar=float(surface_density_to_molar),
     )
 
 

@@ -14,6 +14,55 @@ from ..stiff_ode import integrate_local_system
 from .pd1_params import PD1Params
 
 
+def pd1_synapse_reaction_terms(
+    y: np.ndarray,
+    params: PD1Params,
+    *,
+    total_pd1_density: float,
+    total_pdl1_density: float,
+    total_pdl2_density: float,
+    ab_effective_molar: float,
+) -> tuple[float, float, float, float, float, float, float]:
+    """Return individual reaction fluxes and free species densities."""
+    pdl1, pdl2, ab, ab_pd1 = y
+    bound = pdl1 + pdl2 + ab + 2.0 * ab_pd1
+    pd1_free = max(total_pd1_density - bound, 0.0)
+    pdl1_free = max(total_pdl1_density - pdl1, 0.0)
+    pdl2_free = max(total_pdl2_density - pdl2, 0.0)
+
+    reaction_89 = params.kon_pd1_pdl1 * pd1_free * pdl1_free - params.koff_pd1_pdl1 * pdl1
+    reaction_90 = params.kon_pd1_pdl2 * pd1_free * pdl2_free - params.koff_pd1_pdl2 * pdl2
+    reaction_91 = 2.0 * params.kon_pd1_ab * pd1_free * ab_effective_molar - params.koff_pd1_ab * ab
+    reaction_92 = params.chi_pd1 * params.kon_pd1_ab * pd1_free * ab - 2.0 * params.koff_pd1_ab * ab_pd1
+    return reaction_89, reaction_90, reaction_91, reaction_92, pd1_free, pdl1_free, pdl2_free
+
+
+def pd1_synapse_rhs(
+    y: np.ndarray,
+    params: PD1Params,
+    *,
+    total_pd1_density: float,
+    total_pdl1_density: float,
+    total_pdl2_density: float,
+    ab_effective_molar: float,
+) -> np.ndarray:
+    """Evaluate RHS for the PD-1 synapse system in density units."""
+    reaction_89, reaction_90, reaction_91, reaction_92, _, _, _ = pd1_synapse_reaction_terms(
+        y,
+        params,
+        total_pd1_density=total_pd1_density,
+        total_pdl1_density=total_pdl1_density,
+        total_pdl2_density=total_pdl2_density,
+        ab_effective_molar=ab_effective_molar,
+    )
+    pdl1, pdl2, ab, ab_pd1 = y
+    dpdl1 = reaction_89 - params.internalisation_per_day * pdl1
+    dpdl2 = reaction_90 - params.internalisation_per_day * pdl2
+    dab = reaction_91 - reaction_92 - params.internalisation_per_day * ab
+    dab_pd1 = reaction_92 - params.internalisation_per_day * ab_pd1
+    return np.array([dpdl1, dpdl2, dab, dab_pd1], dtype=float)
+
+
 @dataclass
 class PD1WhiteboxOutputs:
     occupancy: float
@@ -140,22 +189,14 @@ class PD1WhiteboxModel:
         )
 
         def rhs(_, y: np.ndarray) -> np.ndarray:
-            pdl1, pdl2, ab, ab_pd1 = y
-            pd1_free = max(self.total_pd1_density - (pdl1 + pdl2 + ab + 2.0 * ab_pd1), 0.0)
-            pdl1_free = max(self.total_pdl1_density - pdl1, 0.0)
-            pdl2_free = max(self.total_pdl2_density - pdl2, 0.0)
-
-            reaction_89 = self.params.kon_pd1_pdl1 * pd1_free * pdl1_free - self.params.koff_pd1_pdl1 * pdl1
-            reaction_90 = self.params.kon_pd1_pdl2 * pd1_free * pdl2_free - self.params.koff_pd1_pdl2 * pdl2
-            reaction_91 = 2.0 * self.params.kon_pd1_ab * pd1_free * ab_effective - self.params.koff_pd1_ab * ab
-            reaction_92 = self.params.chi_pd1 * self.params.kon_pd1_ab * pd1_free * ab - 2.0 * self.params.koff_pd1_ab * ab_pd1
-
-            area = max(self.params.synapse_area_um2, 1e-6)
-            dpdl1 = reaction_89 / area - self.params.internalisation_per_day * pdl1
-            dpdl2 = reaction_90 / area - self.params.internalisation_per_day * pdl2
-            dab = (reaction_91 - reaction_92) / area - self.params.internalisation_per_day * ab
-            dab_pd1 = reaction_92 / area - self.params.internalisation_per_day * ab_pd1
-            return np.array([dpdl1, dpdl2, dab, dab_pd1], dtype=float)
+            return pd1_synapse_rhs(
+                y,
+                self.params,
+                total_pd1_density=self.total_pd1_density,
+                total_pdl1_density=self.total_pdl1_density,
+                total_pdl2_density=self.total_pdl2_density,
+                ab_effective_molar=ab_effective,
+            )
 
         def _advance(t0: float, t1: float, state: np.ndarray, depth: int = 0) -> np.ndarray:
             span = t1 - t0
