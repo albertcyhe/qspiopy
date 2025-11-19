@@ -1,0 +1,25 @@
+{
+  "metrics": {
+    "tumour_volume_l": {
+      "rmse": 0.005474205442833305,
+      "r2": -14.52455985783829,
+      "delta_auc": -0.4364955831401184,
+      "relative_rmse": 0.34371753431019686,
+      "max_fractional_error": 0.40097101808681296
+    },
+    "tcell_density_per_ul": {
+      "rmse": 179.64005919898545,
+      "r2": -6.785307803710353,
+      "delta_auc": -14451.701695167716,
+      "relative_rmse": 0.5245956631721137,
+      "max_fractional_error": 0.6413221393570168
+    }
+  },
+  "outputs": {
+    "context_csv": "artifacts/dev/A1_geometry_context.csv",
+    "figure": "artifacts/dev/A1_geometry_overlay.png",
+    "surrogate_csv": "artifacts/validation/A1_surrogate.csv",
+    "reference_csv": "artifacts/validation/A1_reference.csv"
+  },
+  "param_overrides": {}
+}

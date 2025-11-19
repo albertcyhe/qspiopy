@@ -1,0 +1,9 @@
+{
+  "geom_growth_per_day": 0.00011629530159216756,
+  "geom_kill_per_cell_per_day": 2.479072833542927e-10,
+  "geom_volume_cap_l": 0.99505,
+  "geom_tau_days": 15.0,
+  "geom_w_pk": 0.01,
+  "geom_w_occ": 0.02,
+  "geom_min_volume_l": 0.010475578779369703
+}

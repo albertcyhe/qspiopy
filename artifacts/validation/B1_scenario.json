@@ -1,0 +1,60 @@
+{
+  "scenario_id": "B1",
+  "label": "PD-1 200 mg Q3W \u00d74 + CTLA-4 1 mg/kg Q6W \u00d72",
+  "model_script": "example1",
+  "stop_time_days": 84.0,
+  "sample_interval_hours": 12.0,
+  "rtol": 1e-06,
+  "atol": 1e-12,
+  "max_step": null,
+  "doses": [
+    {
+      "name": "B1_dose_1",
+      "drug": "nivolumab",
+      "amount_mg": 200.0,
+      "start_time": 0.0,
+      "interval": 0.0,
+      "repeat_count": 0
+    },
+    {
+      "name": "B1_dose_2",
+      "drug": "nivolumab",
+      "amount_mg": 200.0,
+      "start_time": 21.0,
+      "interval": 0.0,
+      "repeat_count": 0
+    },
+    {
+      "name": "B1_dose_3",
+      "drug": "nivolumab",
+      "amount_mg": 200.0,
+      "start_time": 42.0,
+      "interval": 0.0,
+      "repeat_count": 0
+    },
+    {
+      "name": "B1_dose_4",
+      "drug": "nivolumab",
+      "amount_mg": 200.0,
+      "start_time": 63.0,
+      "interval": 0.0,
+      "repeat_count": 0
+    },
+    {
+      "name": "B1_dose_5",
+      "drug": "ipilimumab",
+      "amount_mg": 70.0,
+      "start_time": 0.0,
+      "interval": 0.0,
+      "repeat_count": 0
+    },
+    {
+      "name": "B1_dose_6",
+      "drug": "ipilimumab",
+      "amount_mg": 70.0,
+      "start_time": 42.0,
+      "interval": 0.0,
+      "repeat_count": 0
+    }
+  ]
+}

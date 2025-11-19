@@ -1,0 +1,74 @@
+{
+  "A1": {
+    "pk_state_max": 0.8356545961002786,
+    "pk_state_span": 0.05760770498271062,
+    "occ_max": 0.050002,
+    "occ_min": 1.0000336225126868e-10,
+    "occ_span": 0.05000199989999664,
+    "first_time_95pct": 1.0,
+    "reference_peak": 0.127277931260736,
+    "reference_duration": 84.0,
+    "figure": "artifacts/dev/A1_pd1_driver_compare.png",
+    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A1_flat_debug_20251113T151854.csv"
+  },
+  "A2": {
+    "pk_state_max": 1.504178272980501,
+    "pk_state_span": 0.10369386896887889,
+    "occ_max": 0.050002,
+    "occ_min": 1.0000336225126868e-10,
+    "occ_span": 0.05000199989999664,
+    "first_time_95pct": 1.0,
+    "reference_peak": 0.0699382981392691,
+    "reference_duration": 84.0,
+    "figure": "artifacts/dev/A2_pd1_driver_compare.png",
+    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A2_flat_debug_20251113T151855.csv"
+  },
+  "A3": {
+    "pk_state_max": 0.8356545961002786,
+    "pk_state_span": 0.05760770498271062,
+    "occ_max": 0.050002,
+    "occ_min": 1.0000336225126868e-10,
+    "occ_span": 0.05000199989999664,
+    "first_time_95pct": 1.0,
+    "reference_peak": 0.179974307228719,
+    "reference_duration": 84.0,
+    "figure": "artifacts/dev/A3_pd1_driver_compare.png",
+    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A3_flat_debug_20251113T151857.csv"
+  },
+  "A4": {
+    "pk_state_max": 1.3161559888579386,
+    "pk_state_span": 0.09073213534776925,
+    "occ_max": 0.050002,
+    "occ_min": 1.0000336225126868e-10,
+    "occ_span": 0.05000199989999664,
+    "first_time_95pct": 1.0,
+    "reference_peak": 0.0790851930733019,
+    "reference_duration": 84.0,
+    "figure": "artifacts/dev/A4_pd1_driver_compare.png",
+    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A4_flat_debug_20251113T151858.csv"
+  },
+  "A5": {
+    "pk_state_max": 1.2534818941504178,
+    "pk_state_span": 0.08641155747406626,
+    "occ_max": 0.050002,
+    "occ_min": 1.0000336225126868e-10,
+    "occ_span": 0.05000199989999664,
+    "first_time_95pct": 1.0,
+    "reference_peak": 0.116452223074051,
+    "reference_duration": 84.0,
+    "figure": "artifacts/dev/A5_pd1_driver_compare.png",
+    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A5_flat_debug_20251113T151859.csv"
+  },
+  "A6": {
+    "pk_state_max": 0.1044568245125348,
+    "pk_state_span": 0.007200963122838799,
+    "occ_max": 0.050002,
+    "occ_min": 1.0000336225126868e-10,
+    "occ_span": 0.05000199989999664,
+    "first_time_95pct": 1.0,
+    "reference_peak": 0.623263552203894,
+    "reference_duration": 84.0,
+    "figure": "artifacts/dev/A6_pd1_driver_compare.png",
+    "flat_debug_source": "/Volumes/AlbertSSD/Program/new/qspiopy/artifacts/validation/A6_flat_debug_20251113T151901.csv"
+  }
+}

@@ -51,6 +51,8 @@ def _simulate_python(spec: ScenarioSpec):
         context_outputs=spec.context_outputs,
         dose_audit=audit_rows,
         event_log=events,
+        ic_mode="snapshot",
+        module_blocks=("alignment_driver_block",),
     )
     return result, audit_rows, events
 
@@ -106,8 +108,12 @@ def _compare_frames(
         col_ref = f"{column}_ref"
         if col_py not in merged.columns or col_ref not in merged.columns:
             continue
-        diff = merged[col_py].to_numpy() - merged[col_ref].to_numpy()
-        ref = merged[col_ref].to_numpy()
+        series_py = pd.to_numeric(merged[col_py], errors="coerce")
+        series_ref = pd.to_numeric(merged[col_ref], errors="coerce")
+        if series_py.isna().all() or series_ref.isna().all():
+            continue
+        diff = series_py.to_numpy() - series_ref.to_numpy()
+        ref = series_ref.to_numpy()
         denom = np.linalg.norm(ref) or 1e-12
         rel_l2 = float(np.linalg.norm(diff) / denom)
         max_rel = float(np.max(np.abs(diff) / (np.abs(ref) + 1e-12)))

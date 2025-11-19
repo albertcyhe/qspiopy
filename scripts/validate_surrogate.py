@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from scripts.compare_audits import compare_doses, compare_events
-from scripts.scenario_registry import a_series, doses_to_entries, microdose
+from scripts.scenario_registry import a_series, b_series, doses_to_entries, microdose
 from src.offline.initial_conditions import ICOptions
 from src.offline.entities import ScenarioResult
 from src.offline.frozen_model import EVENT_LOG_FIELDS, load_frozen_model, simulate_frozen_model
@@ -65,21 +65,36 @@ SCENARIO_REGISTRY: Dict[str, Scenario] = {
     ),
 }
 
-A1_SPEC = a_series()[0]
-A1_DOSES = tuple(doses_to_entries(A1_SPEC.doses))
+for spec in a_series():
+    doses = tuple(doses_to_entries(spec.doses))
+    SCENARIO_REGISTRY[spec.name] = Scenario(
+        spec.name,
+        tuple(),
+        spec.therapy,
+        snapshot=spec.snapshot,
+        stop_time=spec.days,
+        sample_interval_hours=spec.sample_interval_hours,
+        custom_doses=doses,
+        context_outputs=dict(spec.context_outputs),
+        module_blocks=("alignment_driver_block",),
+    )
+
+for spec in b_series():
+    doses = tuple(doses_to_entries(spec.doses))
+    SCENARIO_REGISTRY[spec.name] = Scenario(
+        spec.name,
+        tuple(),
+        spec.therapy,
+        snapshot=spec.snapshot,
+        stop_time=spec.days,
+        sample_interval_hours=spec.sample_interval_hours,
+        custom_doses=doses,
+        context_outputs=dict(spec.context_outputs),
+        module_blocks=("alignment_driver_block",),
+    )
+
 MICRO_SPEC = microdose()
 MICRO_DOSES = tuple(doses_to_entries(MICRO_SPEC.doses))
-SCENARIO_REGISTRY["A1"] = Scenario(
-    "A1",
-    tuple(),
-    "anti_pd1",
-    snapshot=A1_SPEC.snapshot,
-    stop_time=A1_SPEC.days,
-    sample_interval_hours=A1_SPEC.sample_interval_hours,
-    custom_doses=A1_DOSES,
-    context_outputs=dict(A1_SPEC.context_outputs),
-    module_blocks=("pd1_bridge_block", "tumour_geometry_block"),
-)
 SCENARIO_REGISTRY[MICRO_SPEC.name] = Scenario(
     MICRO_SPEC.name,
     tuple(),
@@ -96,6 +111,38 @@ SCENARIO_REGISTRY[MICRO_SPEC.name] = Scenario(
 def _parse_param_overrides(pairs: Iterable[str]) -> Dict[str, float]:
     overrides: Dict[str, float] = {}
     for pair in pairs:
+        if not pair:
+            continue
+        if pair.startswith("@"):
+            path = Path(pair[1:])
+            try:
+                payload = json.loads(path.read_text(encoding="utf8"))
+            except Exception as exc:  # pragma: no cover - CLI validation
+                raise SystemExit(f"Failed to load overrides from '{path}': {exc}") from exc
+            if isinstance(payload, dict):
+                items = payload.items()
+            elif isinstance(payload, list):
+                items = []
+                for entry in payload:
+                    if isinstance(entry, dict) and "name" in entry and "value" in entry:
+                        items.append((entry["name"], entry["value"]))
+                    else:
+                        raise SystemExit(
+                            f"Invalid override entry in '{path}': {entry!r}; "
+                            "expected objects with 'name' and 'value'"
+                        )
+            else:
+                raise SystemExit(
+                    f"Invalid override payload in '{path}'; expected dict or list"
+                )
+            for name, value in items:
+                try:
+                    overrides[str(name).strip()] = float(value)
+                except ValueError as exc:
+                    raise SystemExit(
+                        f"Non-numeric override value for '{name}' in '{path}': {exc}"
+                    ) from exc
+            continue
         if "=" not in pair:
             raise SystemExit(f"Invalid --param-override '{pair}'; expected name=value")
         name, value = pair.split("=", 1)
@@ -172,9 +219,13 @@ def _compute_metrics(
     auc_pred = float(np.trapezoid(y_pred, merged["time_days"]))
     delta_auc = float(auc_pred - auc_true)
 
-    mean_abs = float(np.mean(np.abs(y_true))) or 1e-12
+    denom_floor = 1e-3
+    mean_abs = float(np.mean(np.abs(y_true)))
+    if mean_abs < denom_floor:
+        mean_abs = denom_floor
     rel_rmse = rmse / mean_abs
-    max_pct = float(np.max(np.abs(diff) / (np.abs(y_true) + 1e-12)))
+    safe_true = np.maximum(np.abs(y_true), denom_floor)
+    max_pct = float(np.max(np.abs(diff) / safe_true))
 
     return {
         "rmse": rmse,
@@ -185,7 +236,9 @@ def _compute_metrics(
     }
 
 
-def _dump_flat_debug(scenario_name: str, result: ScenarioResult, limit: int) -> None:
+def _dump_flat_debug(
+    scenario_name: str, result: ScenarioResult, limit: int, output_dir: Optional[Path] = None
+) -> None:
     if limit <= 0:
         return
     contexts = result.raw_contexts
@@ -214,9 +267,41 @@ def _dump_flat_debug(scenario_name: str, result: ScenarioResult, limit: int) -> 
         ("V_T.nivo", "V_T.nivolumab"),
         ("aPD1", "aPD1"),
         ("H_PD1_C1", "H_PD1_C1"),
+        ("pd1_alignment_pk_state", "pd1_alignment_pk_state"),
+        ("pd1_alignment_concentration_pk", "pd1_alignment_concentration_pk"),
+        ("pd1_alignment_concentration_M", "pd1_alignment_concentration_M"),
+        ("pd1_alignment_projection_molar", "pd1_alignment_projection_molar"),
+        ("pd1_alignment_projection_surface", "pd1_alignment_projection_surface"),
+        ("pd1_alignment_effective_time_days", "pd1_alignment_effective_time_days"),
+        ("pd1_alignment_last_raw_time_days", "pd1_alignment_last_raw_time_days"),
+        ("pd1_alignment_step_dt", "pd1_alignment_step_dt"),
+        ("pd1_alignment_step_count", "pd1_alignment_step_count"),
+        ("pd1_alignment_debug_enabled", "pd1_alignment_debug_enabled"),
+        ("pd1_alignment_pending_dt", "pd1_alignment_pending_dt"),
+        ("pd1_alignment_volume_l", "pd1_alignment_volume_l"),
         ("pd1_occupancy_ctx", "pd1_occupancy"),
+        ("pd1_filter_input", "pd1_filter_input"),
+        ("pd1_filter_primary", "pd1_filter_primary"),
+        ("pd1_filter_secondary", "pd1_filter_secondary"),
+        ("pd1_filter_output", "pd1_filter_output"),
+        ("pd1_filter_surface_density", "pd1_filter_surface_density"),
+        ("pd1_filter_pd1_50_eff", "pd1_filter_pd1_50_eff"),
+        ("pd1_whitebox_raw_occ", "pd1_whitebox_raw_occ"),
+        ("pd1_whitebox_blocked_fraction", "pd1_whitebox_blocked_fraction"),
+        ("syn_pd1_total", "syn_pd1_total"),
+        ("syn_pdl1_total", "syn_pdl1_total"),
+        ("syn_pdl2_total", "syn_pdl2_total"),
+        ("syn_pd1_pdl1", "syn_pd1_pdl1"),
+        ("syn_pd1_pdl2", "syn_pd1_pdl2"),
+        ("syn_pd1_apd1", "syn_pd1_apd1"),
+        ("syn_pd1_apd1_pd1", "syn_pd1_apd1_pd1"),
         ("tumour_volume_ctx", "tumour_volume_l"),
         ("V_T_ctx", "V_T"),
+        ("geom_live_volume_l", "geom_live_volume_l"),
+        ("geom_dead_instant_volume_l", "geom_dead_instant_volume_l"),
+        ("geom_dead_filtered_volume_l", "geom_dead_filtered_volume_l"),
+        ("geom_target_volume_l", "geom_target_volume_l"),
+        ("geom_volume_smoothed_l", "geom_volume_smoothed_l"),
         ("tcell_density_ctx", "tcell_density_per_ul"),
     ]
     for idx in range(limit):
@@ -233,6 +318,11 @@ def _dump_flat_debug(scenario_name: str, result: ScenarioResult, limit: int) -> 
     frame = pd.DataFrame(rows)
     with pd.option_context("display.max_columns", None, "display.width", 160):
         print(frame.to_string(index=False, float_format=lambda x: f"{x: .6g}"))
+    if output_dir is not None:
+        timestamp = time.strftime("%Y%m%dT%H%M%S")
+        path = output_dir / f"{scenario_name}_flat_debug_{timestamp}.csv"
+        frame.to_csv(path, index=False)
+        print(f"[flat-debug] scenario={scenario_name} wrote {path}")
 
 
 def _tgi(volume_control: pd.DataFrame, volume_treated: pd.DataFrame, column: str) -> float:
@@ -700,7 +790,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         reference = reference_frame
 
         if args.dump_flat_debug:
-            _dump_flat_debug(scenario.name, scenario_result, args.dump_flat_debug)
+            _dump_flat_debug(
+                scenario.name, scenario_result, args.dump_flat_debug, output_dir=args.output
+            )
 
         top_table, worst_sur = summarize_alignment_errors(surrogate, reference, observables)
         if args.emit_diagnostics and not top_table.empty:
