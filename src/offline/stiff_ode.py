@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Callable, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -36,6 +36,7 @@ def solve_stiff_ivp(
     vectorized: bool = False,
     allow_shrink: bool = True,
     max_attempts: int = 8,
+    debug: Optional[Callable[[Dict[str, object]], None]] = None,
 ):
     """Wrapper around solve_ivp with consistent retry semantics."""
 
@@ -81,6 +82,18 @@ def solve_stiff_ivp(
             jac_sparsity=jac_sparsity,
             vectorized=vectorized,
         )
+        if debug is not None:
+            debug(
+                {
+                    "t0": t0,
+                    "t1": t1,
+                    "status": result.status,
+                    "message": result.message,
+                    "nfev": getattr(result, "nfev", None),
+                    "njev": getattr(result, "njev", None),
+                    "nlu": getattr(result, "nlu", None),
+                }
+            )
         if result.success or not allow_shrink:
             return result
         if not _looks_like_step_failure(result.message or ""):
@@ -112,6 +125,7 @@ def integrate_local_system(
     solver: "SolverConfig",
     *,
     max_internal_step_days: Optional[float] = 1e-4,
+    debug: Optional[Callable[[Dict[str, object]], None]] = None,
 ) -> StateVector:
     """Integrate a small stiff system y' = rhs(t, y) reusing SolverConfig."""
     start = float(t0)
@@ -139,6 +153,7 @@ def integrate_local_system(
         dense_output=False,
         events=None,
         allow_shrink=True,
+        debug=debug,
     )
     if not sol.success or not sol.y.size:
         raise NumericsError(f"Stiff ODE integration failed: {sol.message}")

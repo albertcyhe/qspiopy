@@ -52,18 +52,27 @@ PD‑1 子系统已经照 stiff solver 模板完成白盒迁移（probe → diff
 3. 明确 observable 定义：`tcell_density_per_ul`, `tumour_volume_l`, 以及任何组合信号（伪进展指数、死亡体积）都要写明公式。
 
 ### Step B — MATLAB probe
-1. ✅ 已完成：`matlab/scripts/dev_tcell_probe.m` 已可导出 `nT1/aT1/T1/T_exh` + `H_PD1_C1` + finite diff，样例输出见 `artifacts/dev/tcell_probe_pd1_train_0004.csv`。
-2. 同理准备 `dev_geometry_probe.m`（如果 `V_T` 由复杂规则驱动）。输出 tumour volume、live/dead/T cell volume、几何滤波信号；Python 侧已有 `scripts/dev_geometry_probe_diff.py` 可复用 PD‑1/T cell 的 diff 体验。
+1. ✅ 已完成：`matlab/scripts/dev_tcell_probe.m` 现已导出 `nT1/aT1/T1/T_exh`、`H_PD1_C1`、`H_mAPC`、`H_P1` 以及所有 finite diff；样例输出见 `artifacts/dev/tcell_probe_pd1_train_0004.csv`。
+2. ✅ `dev_geometry_probe.m` 可生成 `tumour_volume_l` + live/dead/T cell 体积；配套 `scripts/dev_geometry_probe_diff.py` 在 `pd1_train_0002/0004` 上已验证几何白盒与 MATLAB 对齐。（`pd1_train_0001` 仍受 MATLAB solver 容忍度限制，暂跳过。）
 
 ### Step C — Python diff + 白盒模块
 1. ✅ 已完成初版：`src/offline/modules/tcell_whitebox.py` 已加载 snapshot 参数并接入 stiff solver，但 RHS 仍需按 probe diff 校正，单测框架待补。
-2. ✅ `scripts/dev_tcell_probe_diff.py` 已上线（支持 `--estimate-density-scale` 输出 `tcell_density_scale` 校准因子）；当前 `pd1_train_0004` RMSE 仍在 1e8 量级，需据此调整 ODE 直到降至 <5e‑2。
-3. 对几何模块重复上一步：`geometry_whitebox.py` + `scripts/dev_geometry_probe_diff.py`，保证 `tumour_volume_l`、`geom_volume_smoothed_l`、`tcell_density_per_ul` 的物理一致。
+2. ✅ `scripts/dev_tcell_probe_diff.py` 现支持 `--track-derivs` 与 flux 记录；`tcell_whitebox.py` 也已匹配 MATLAB 的 `(Tumor_T1+Tumor_T0)/V_T` 观测，`pd1_train_0004` diff 显示 `RMSE_density≈1.5e-7`、`RMSE_dTumor_T1_dt≈2e-11`。
+3. ✅ 几何模块同样具备 probe/diff (`geometry_whitebox.py` + `scripts/dev_geometry_probe_diff.py`)，`pd1_train_0002/0004` 的 `tumour_volume_l` 与 live/dead cell 轨迹皆达机器精度。
 
 ### Step D — Runtime 接入
-1. 在 `alignment_driver_block` 中替换 T cell follower → `TCellWhiteboxModel`，几何 follower → `GeometryWhiteboxModel`。保持与 PD‑1 白盒相同的构造方式（`from_context`, `step`, `writeback`）。
-2. CLI 验证：`python -m scripts.validate_surrogate --scenarios A1 --ic-mode snapshot --emit-diagnostics --dump-flat-debug 5 --module-block alignment_driver_block`. 关注 `pd1_occupancy`, `tcell_density_per_ul`, `tumour_volume_l` 的 RMSE 是否显著下降。
+1. ✅ `alignment_driver_block` 已可在 `alignment_mode=1` 下启用 `tcell_alignment_use_whitebox` / `geometry_alignment_use_whitebox`；`alignment_mode=2` 会同时启用 PD‑1 白盒，但当前在 A1 上触发 `NumericsError`（PD‑1 ODE “Required step size is less than spacing between numbers”）。已计划的修复步骤：
+   - 在 `alignment_driver_block` 中缓存 `last_pd1_update_time`，若 `dt ≤ min_dt_pd1`（例如 1e‑6 day）则跳过 `pd1_model.step`，避免在同一时刻被多次调用。
+   - 构造 `PD1WhiteboxModel` 时传入宽松一点的 SolverConfig（专属 `rtol/atol/max_step`），并将每段 `dt` 限制为 `min(max_internal_step, dt/4)`。
+   - 在 `stiff_ode.solve_stiff_ivp` / `integrate_local_system` 中增加可选 debug hook，记录 `(t0, t1, nfev, njev, status, message)`，以便 future diagnose。
+   - 若上述仍有 sporadic failure，捕获 `NumericsError` 时落回解析 steady state 或灰盒 Hill 近似，以 warning 方式继续 runtime。
+2. ⏳ CLI 验证：`python -m scripts.validate_surrogate --scenarios A1 --ic-mode snapshot --emit-diagnostics --dump-flat-debug 5 --module-block alignment_driver_block --param-override alignment_mode=1 --param-override tcell_alignment_use_whitebox=1 --param-override geometry_alignment_use_whitebox=1` 已跑通，但因 PD‑1 仍是灰盒滤波，`pd1_occupancy` rel_err≈1e2。待上述 PD‑1 调用/容差修复完成后，再切回 `alignment_mode=2` 重跑并观察 `pd1_occupancy`/`tcell_density_per_ul`/`tumour_volume_l` 三个观测。
 3. 若 solver 行为稳定，再扩展到 A2–A6，记录 `artifacts/validation/metrics.csv` 中的变化。
+4. 🔄 2025‑11‑19 更新：`alignment_driver_block` 现已直接调用 `_project_pd1_to_synapse` 聚合 `V_C/V_T/V_P/V_LN` 的 nivolumab 浓度，新的调试字段 `pd1_alignment_concentration_pk/projection_molar/projection_surface`、`pd1_whitebox_blocked_fraction` 已在 `--dump-flat-debug` 中输出。A1 运行显示投影浓度约 2.2×10⁻⁷ M，与 MATLAB `drug_tumor_molar` 同级；然而白盒 `syn_pd1_pdl1/syn_pd1_pdl2` 仍保持 0，`H_PD1_C1` 也一直为 0。下一步需要开启 `pd1_alignment_debug_solver=1` 逐段记录 `(t0,t1)` 和 RHS，以确认是否有参数单位或 state writeback 漏洞导致复合物始终无法积累。
+5. 🔄 2025‑11‑19（二次更新）：为了解决 repeated assignment 把 `time_days` 反复打回 0 的问题，在 runtime 里新增 monotonic “effective time” 和 `pd1_alignment_pending_dt/step_dt/step_count` 诊断字段，并确保 `syn_T1_C1.*` 与 `syn_pd1_*` 同步写回。现在 `pd1_alignment_step_dt` 只要累计到 `max(pd1_alignment_min_dt_days, 1e-6)` 就会触发 BDF 步进，CLI 日志能看到首次 `should=True` 的调用，但仍然在 `dt≈1e-7` 附近触发 `NumericsError: Required step size is less than spacing between numbers`。下一步需要：
+    - 把 `pd1_alignment_min_dt_days` 或内部 pending gate 提到 1e-4 左右，避免 BDF 在 machine‑eps 级别挣扎；
+    - 或者在 `pd1_whitebox_model.step` 内部添加兜底，若 span 太小就直接重用上一状态，防止 driver 卡死。
+    - 一旦 solver 稳定，再重跑 `--dump-flat-debug` 验证 `syn_pd1_pdl1` 是否离开 0。
 
 ### Step E — 数据/文档
 1. 决定是否需要干净的 T cell/几何训练集：如果要拟合，就仿照 PD‑1 写 clean exporter 并生成 parquet。

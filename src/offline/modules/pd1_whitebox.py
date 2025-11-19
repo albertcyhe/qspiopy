@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, MutableMapping
+from typing import Mapping, MutableMapping, Optional
 
+import logging
 import math
 import numpy as np
 
@@ -12,6 +13,8 @@ from ..errors import NumericsError
 from ..segment_integrator import SolverConfig
 from ..stiff_ode import integrate_local_system
 from .pd1_params import PD1Params
+
+logger = logging.getLogger(__name__)
 
 
 def pd1_synapse_reaction_terms(
@@ -84,6 +87,7 @@ class PD1WhiteboxModel:
     syn_pd1_ab: float
     syn_pd1_ab_pd1: float
     time_days: float
+    _debug_enabled: bool = False
 
     @classmethod
     def from_context(
@@ -198,18 +202,24 @@ class PD1WhiteboxModel:
                 ab_effective_molar=ab_effective,
             )
 
+        debug_cb = self._solver_debug if self._debug_enabled else None
+
         def _advance(t0: float, t1: float, state: np.ndarray, depth: int = 0) -> np.ndarray:
             span = t1 - t0
             if span <= 1e-12:
                 return state
             try:
+                internal_step = self.params.max_step_days
+                if span > 0.0:
+                    internal_step = min(internal_step, max(span * 0.25, 1e-9))
                 return integrate_local_system(
                     rhs,
                     state,
                     t0,
                     t1,
                     solver=self.solver_config,
-                    max_internal_step_days=min(span, self.params.max_step_days),
+                    max_internal_step_days=internal_step,
+                    debug=debug_cb,
                 )
             except NumericsError:
                 if depth >= 6 or span <= 1e-6:
@@ -232,10 +242,33 @@ class PD1WhiteboxModel:
         return min(max(blocked, 0.0), 1.0)
 
     def writeback(self, context: MutableMapping[str, float]) -> None:
+        # Update both canonical aliases and the original snapshot identifiers so that
+        # FrozenModel.sync_state_from_context persists the modified synapse states.
+        context["syn_T1_C1.PD1"] = self.total_pd1_density
         context["syn_pd1_total"] = self.total_pd1_density
+        context["syn_T1_C1.PDL1"] = self.total_pdl1_density
         context["syn_pdl1_total"] = self.total_pdl1_density
+        context["syn_T1_C1.PDL2"] = self.total_pdl2_density
         context["syn_pdl2_total"] = self.total_pdl2_density
+        context["syn_T1_C1.PD1_PDL1"] = self.syn_pd1_pdl1
         context["syn_pd1_pdl1"] = self.syn_pd1_pdl1
+        context["syn_T1_C1.PD1_PDL2"] = self.syn_pd1_pdl2
         context["syn_pd1_pdl2"] = self.syn_pd1_pdl2
+        context["syn_T1_C1.PD1_aPD1"] = self.syn_pd1_ab
         context["syn_pd1_apd1"] = self.syn_pd1_ab
+        context["syn_T1_C1.PD1_aPD1_PD1"] = self.syn_pd1_ab_pd1
         context["syn_pd1_apd1_pd1"] = self.syn_pd1_ab_pd1
+
+    def _solver_debug(self, payload: Mapping[str, object]) -> None:
+        if not self._debug_enabled:
+            return
+        logger.debug(
+            "pd1_whitebox solver span=(%.6g, %.6g) status=%s message=%s nfev=%s njev=%s nlu=%s",
+            payload.get("t0"),
+            payload.get("t1"),
+            payload.get("status"),
+            payload.get("message"),
+            payload.get("nfev"),
+            payload.get("njev"),
+            payload.get("nlu"),
+        )

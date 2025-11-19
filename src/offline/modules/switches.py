@@ -11,6 +11,7 @@ from typing import Callable, Dict, Iterable, List, Literal, Mapping, MutableMapp
 from types import MethodType
 
 from ..snapshot import FrozenModel
+from ..segment_integrator import SolverConfig
 from .pd1_params import pd1_params_from_snapshot
 from .pd1_whitebox import PD1WhiteboxModel, PD1WhiteboxOutputs
 from .geometry_whitebox import GeometryWhiteboxModel
@@ -430,6 +431,19 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
     occ_ceiling = float(parameters.get("pd1_occ_ceiling", 0.15))
     use_whitebox_pd1 = alignment_mode >= 2 or bool(parameters.get("pd1_alignment_use_whitebox", 0.0))
     pd1_whitebox_model: Optional[PD1WhiteboxModel] = None
+    pd1_min_dt_days = max(float(parameters.get("pd1_alignment_min_dt_days", 0.0)), 0.0)
+    pd1_solver_rtol = max(float(parameters.get("pd1_alignment_solver_rtol", pd1_params.solver_rtol)), 1e-10)
+    pd1_solver_atol = max(float(parameters.get("pd1_alignment_solver_atol", pd1_params.solver_atol)), 1e-12)
+    pd1_solver_max_step = max(float(parameters.get("pd1_alignment_max_step_days", pd1_params.max_step_days)), 1e-9)
+    pd1_context_conc_min = max(float(parameters.get("pd1_alignment_context_conc_min_molar", 1e-12)), 0.0)
+    pd1_solver_config = SolverConfig(
+        method="BDF",
+        rtol=pd1_solver_rtol,
+        atol=pd1_solver_atol,
+        max_step=pd1_solver_max_step,
+        seed=None,
+    )
+    pd1_debug_solver = bool(parameters.get("pd1_alignment_debug_solver", 0.0))
 
     grow_rate = float(parameters.get("geom_growth_per_day", 0.01))
     kill_coeff = float(parameters.get("geom_kill_per_cell_per_day", 1e-14))
@@ -458,6 +472,11 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
     tcell_offset = float(parameters.get("tcell_alignment_offset_cells", 0.0))
     tcell_min_cells = max(float(parameters.get("tcell_alignment_min_cells", 0.0)), 0.0)
     tcell_occ_supp = float(parameters.get("tcell_alignment_occ_supp_coeff", 0.0))
+    last_pd1_update_time: float | None = None
+    last_pd1_effective_time: float | None = None
+    pd1_step_count = 0
+    monotonic_time: float | None = None
+    pd1_pending_dt = 0.0
 
     def refresh_schedule() -> None:
         nonlocal schedule_source, schedule, dose_index
@@ -484,18 +503,26 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
         return min_volume_l
 
     def apply(context: MutableMapping[str, float]) -> None:
-        nonlocal pk_state, occ_state, volume_state, last_time, dose_index, tcell_state, pd1_whitebox_model, tcell_whitebox_model
+        nonlocal pk_state, occ_state, volume_state, last_time, dose_index, tcell_state, pd1_whitebox_model, tcell_whitebox_model, geometry_whitebox_model, last_pd1_update_time, pd1_step_count, monotonic_time, last_pd1_effective_time, pd1_pending_dt
 
         refresh_schedule()
         raw_snapshot_occ = float(context.get("H_PD1_C1", occ_state))
         current_time = float(context.get("time_days", context.get("t", 0.0)))
+        if monotonic_time is None or current_time >= monotonic_time - 1e-15:
+            monotonic_time = current_time
+        effective_time = monotonic_time if monotonic_time is not None else current_time
         if last_time is None:
-            last_time = current_time
+            last_time = effective_time
             volume_state = _extract_volume_l(context)
             if use_whitebox_pd1 and pd1_whitebox_model is None:
-                pd1_whitebox_model = PD1WhiteboxModel.from_context(pd1_params, context, solver_config=solver_config)
-        delta_t = max(0.0, current_time - (last_time or current_time))
-        last_time = current_time
+                pd1_whitebox_model = PD1WhiteboxModel.from_context(pd1_params, context, solver_config=pd1_solver_config)
+                if pd1_debug_solver:
+                    pd1_whitebox_model._debug_enabled = True
+        if last_pd1_update_time is None:
+            last_pd1_update_time = effective_time
+        prev_time = effective_time if last_time is None else last_time
+        delta_t = max(0.0, effective_time - prev_time)
+        last_time = effective_time
 
         if delta_t > 0.0:
             pk_state *= math.exp(-delta_t / tau_pk)
@@ -503,29 +530,80 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
             pk_state += dose_scale * schedule[dose_index][1]
             dose_index += 1
 
-        conc = pk_state * conc_scale
+        conc_pk = pk_state * conc_scale
         surface_density = max(pk_state * surface_scale, 0.0)
+        conc = conc_pk
+        projected_conc = 0.0
+        projected_surface = 0.0
         if use_whitebox_pd1:
-            conc = _finite_value(context.get("V_T.nivolumab", context.get("aPD1", conc)))
-            surface_density = _molar_to_surface(conc, synapse_depth_um)
+            projected_conc, projected_surface = _project_pd1_to_synapse(context, parameters, synapse_depth_um)
+            if projected_conc > pd1_context_conc_min:
+                conc = projected_conc
+                surface_density = projected_surface
+            else:
+                surface_density = _molar_to_surface(conc, synapse_depth_um)
 
         pd1_whitebox_raw_value = raw_snapshot_occ
         pd1_blocked_fraction = occ_state
         context["pd1_whitebox_snapshot_occ"] = raw_snapshot_occ
         if use_whitebox_pd1:
+            debug_enabled = False
             if pd1_whitebox_model is None:
-                pd1_whitebox_model = PD1WhiteboxModel.from_context(pd1_params, context, solver_config=solver_config)
-            pd1_outputs: PD1WhiteboxOutputs = pd1_whitebox_model.step(conc, delta_t)
+                pd1_whitebox_model = PD1WhiteboxModel.from_context(pd1_params, context, solver_config=pd1_solver_config)
+                if pd1_debug_solver:
+                    pd1_whitebox_model._debug_enabled = True
+            debug_enabled = bool(getattr(pd1_whitebox_model, "_debug_enabled", False))
+            if last_pd1_effective_time is None:
+                last_pd1_effective_time = effective_time
+            pd1_pending_dt += max(effective_time - last_pd1_effective_time, 0.0)
+            last_pd1_effective_time = effective_time
+            min_gate = max(pd1_min_dt_days, 1e-6)
+            pd1_step_dt = pd1_pending_dt
+            should_step = pd1_step_dt >= min_gate
+            if pd1_debug_solver:
+                logger.debug(
+                    "pd1_alignment step t=%.6g(last_raw=%.6g) last=%.6g pending=%.6g gate=%.3g should=%s",
+                    effective_time,
+                    current_time,
+                    last_pd1_update_time,
+                    pd1_pending_dt,
+                    min_gate,
+                    should_step,
+                )
+            if should_step:
+                pd1_step_count += 1
+                pd1_outputs = pd1_whitebox_model.step(conc, pd1_step_dt)
+                pd1_whitebox_model.writeback(context)
+                last_pd1_update_time = effective_time
+                pd1_pending_dt = 0.0
+            else:
+                raw_density = max(pd1_whitebox_model.syn_pd1_pdl1 + pd1_whitebox_model.syn_pd1_pdl2, 0.0)
+                pd1_outputs = PD1WhiteboxOutputs(
+                    occupancy=pd1_whitebox_model.occ_smoothed,
+                    raw_complexes=raw_density,
+                    complex_density=pd1_whitebox_model.syn_pd1_pdl1,
+                    blocked_fraction=pd1_whitebox_model._blocked_fraction(),
+                )
+                pd1_whitebox_model.writeback(context)
             occ_state = pd1_outputs.occupancy
             pd1_whitebox_raw_value = pd1_outputs.raw_complexes
             pd1_blocked_fraction = pd1_outputs.blocked_fraction
+            context["pd1_whitebox_blocked_fraction"] = pd1_blocked_fraction
             context["pd1_whitebox_complex_density"] = pd1_outputs.complex_density
-            pd1_whitebox_model.writeback(context)
+            context["pd1_alignment_step_dt"] = pd1_step_dt if should_step else 0.0
+            context["pd1_alignment_step_count"] = float(pd1_step_count)
+            context["pd1_alignment_debug_enabled"] = 1.0 if debug_enabled else 0.0
+            context["pd1_alignment_pending_dt"] = pd1_pending_dt
         else:
             if delta_t > 0.0:
                 d_occ = kon_eff * conc * (1.0 - occ_state) - (koff_eff + k_int) * occ_state
                 occ_state = min(max(occ_state + d_occ * delta_t, occ_floor), occ_ceiling)
             context["pd1_whitebox_complex_density"] = float(context.get("syn_pd1_pdl1", 0.0))
+            context["pd1_whitebox_blocked_fraction"] = pd1_blocked_fraction
+            context["pd1_alignment_step_dt"] = 0.0
+            context["pd1_alignment_step_count"] = float(pd1_step_count)
+            context["pd1_alignment_debug_enabled"] = 0.0
+            context["pd1_alignment_pending_dt"] = pd1_pending_dt
 
         if geometry_whitebox:
             if geometry_whitebox_model is None:
@@ -535,7 +613,7 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
                     solver_config=solver_config,
                 )
             geometry_whitebox_model.step(context, delta_t, occ_state)
-            volume_state = float(context.get("tumour_volume_l", context.get("V_T", min_volume_l)))
+            volume_state = float(context.get("tumour_volume_l", geometry_whitebox_model.volume_l))
         else:
             if volume_state is None:
                 volume_state = _extract_volume_l(context)
@@ -548,14 +626,18 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
             context["tumor_volume_l"] = volume_state
             context["V_T"] = volume_state * 1e6
 
-        if not use_whitebox_pd1:
-            context["aPD1"] = conc
+        context["aPD1"] = conc
         context["aPD1_concentration_molar"] = conc
         context["aPD1_surface_molecules_per_um2"] = surface_density
         context["pd1_occupancy"] = pd1_blocked_fraction
         context["H_PD1_C1"] = occ_state
         context["pd1_alignment_pk_state"] = pk_state
+        context["pd1_alignment_concentration_pk"] = conc_pk
         context["pd1_alignment_concentration_M"] = conc
+        context["pd1_alignment_projection_molar"] = projected_conc
+        context["pd1_alignment_projection_surface"] = projected_surface
+        context["pd1_alignment_effective_time_days"] = effective_time
+        context["pd1_alignment_last_raw_time_days"] = current_time
         context["pd1_alignment_volume_l"] = volume_state
         context["pd1_whitebox_raw_occ"] = pd1_whitebox_raw_value
 

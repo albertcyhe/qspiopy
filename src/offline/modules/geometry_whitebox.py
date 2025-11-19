@@ -153,8 +153,6 @@ class GeometryWhiteboxModel:
         context["V_T.C1"] = self.c_live
         context["C1"] = self.c_live
         context["V_T.C_x"] = self.c_dead
-        context["C_x"] = self.c_dead
-        context["C_total"] = self.c_live
         context["tumour_volume_l"] = self.volume_l
         context["tumor_volume_l"] = self.volume_l
         context["V_T"] = self.volume_l * 1e6
