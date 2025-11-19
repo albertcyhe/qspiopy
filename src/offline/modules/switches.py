@@ -10,6 +10,7 @@ from typing import Callable, Dict, Iterable, List, Literal, Mapping, MutableMapp
 
 from types import MethodType
 
+from ..errors import NumericsError
 from ..snapshot import FrozenModel
 from ..segment_integrator import SolverConfig
 from .pd1_params import pd1_params_from_snapshot
@@ -114,6 +115,18 @@ def _project_pd1_to_synapse(
     concentration = accumulator if has_weight else 0.0
     surface_density = _molar_to_surface(concentration, syn_depth_um)
     return concentration, surface_density
+
+
+def _pd1_outputs_from_model(model: PD1WhiteboxModel) -> PD1WhiteboxOutputs:
+    """Return zero-order hold outputs derived from the current PD-1 state."""
+
+    raw_density = max(model.syn_pd1_pdl1 + model.syn_pd1_pdl2, 0.0)
+    return PD1WhiteboxOutputs(
+        occupancy=model.occ_smoothed,
+        raw_complexes=raw_density,
+        complex_density=model.syn_pd1_pdl1,
+        blocked_fraction=model._blocked_fraction(),
+    )
 
 
 @dataclass(frozen=True)
@@ -477,6 +490,7 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
     pd1_step_count = 0
     monotonic_time: float | None = None
     pd1_pending_dt = 0.0
+    pd1_solver_warned = False
 
     def refresh_schedule() -> None:
         nonlocal schedule_source, schedule, dose_index
@@ -503,7 +517,7 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
         return min_volume_l
 
     def apply(context: MutableMapping[str, float]) -> None:
-        nonlocal pk_state, occ_state, volume_state, last_time, dose_index, tcell_state, pd1_whitebox_model, tcell_whitebox_model, geometry_whitebox_model, last_pd1_update_time, pd1_step_count, monotonic_time, last_pd1_effective_time, pd1_pending_dt
+        nonlocal pk_state, occ_state, volume_state, last_time, dose_index, tcell_state, pd1_whitebox_model, tcell_whitebox_model, geometry_whitebox_model, last_pd1_update_time, pd1_step_count, monotonic_time, last_pd1_effective_time, pd1_pending_dt, pd1_solver_warned
 
         refresh_schedule()
         raw_snapshot_occ = float(context.get("H_PD1_C1", occ_state))
@@ -530,18 +544,25 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
             pk_state += dose_scale * schedule[dose_index][1]
             dose_index += 1
 
-        conc_pk = pk_state * conc_scale
-        surface_density = max(pk_state * surface_scale, 0.0)
+        conc_pk = max(_finite_value(pk_state * conc_scale), 0.0)
+        surface_density = max(_finite_value(pk_state * surface_scale), 0.0)
         conc = conc_pk
         projected_conc = 0.0
         projected_surface = 0.0
         if use_whitebox_pd1:
             projected_conc, projected_surface = _project_pd1_to_synapse(context, parameters, synapse_depth_um)
+            projected_conc = max(_finite_value(projected_conc), 0.0)
+            projected_surface = max(_finite_value(projected_surface), 0.0)
             if projected_conc > pd1_context_conc_min:
                 conc = projected_conc
                 surface_density = projected_surface
             else:
                 surface_density = _molar_to_surface(conc, synapse_depth_um)
+
+        conc = max(_finite_value(conc), 0.0)
+        surface_density = max(_finite_value(surface_density), 0.0)
+        projected_conc = max(_finite_value(projected_conc), 0.0)
+        projected_surface = max(_finite_value(projected_surface), 0.0)
 
         pd1_whitebox_raw_value = raw_snapshot_occ
         pd1_blocked_fraction = occ_state
@@ -557,40 +578,62 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
                 last_pd1_effective_time = effective_time
             pd1_pending_dt += max(effective_time - last_pd1_effective_time, 0.0)
             last_pd1_effective_time = effective_time
-            min_gate = max(pd1_min_dt_days, 1e-6)
-            pd1_step_dt = pd1_pending_dt
-            should_step = pd1_step_dt >= min_gate
+            min_gate = max(pd1_min_dt_days, 1e-4)
+            pending_dt = pd1_pending_dt
+            should_step = pending_dt >= min_gate
+            pd1_step_dt = pending_dt if should_step else 0.0
+            pd1_step_status = 0.0
+            pd1_last_error_flag = 0.0
+            pd1_outputs = _pd1_outputs_from_model(pd1_whitebox_model)
             if pd1_debug_solver:
                 logger.debug(
                     "pd1_alignment step t=%.6g(last_raw=%.6g) last=%.6g pending=%.6g gate=%.3g should=%s",
                     effective_time,
                     current_time,
                     last_pd1_update_time,
-                    pd1_pending_dt,
+                    pending_dt,
                     min_gate,
                     should_step,
                 )
             if should_step:
                 pd1_step_count += 1
-                pd1_outputs = pd1_whitebox_model.step(conc, pd1_step_dt)
-                pd1_whitebox_model.writeback(context)
-                last_pd1_update_time = effective_time
-                pd1_pending_dt = 0.0
-            else:
-                raw_density = max(pd1_whitebox_model.syn_pd1_pdl1 + pd1_whitebox_model.syn_pd1_pdl2, 0.0)
-                pd1_outputs = PD1WhiteboxOutputs(
-                    occupancy=pd1_whitebox_model.occ_smoothed,
-                    raw_complexes=raw_density,
-                    complex_density=pd1_whitebox_model.syn_pd1_pdl1,
-                    blocked_fraction=pd1_whitebox_model._blocked_fraction(),
-                )
-                pd1_whitebox_model.writeback(context)
+                try:
+                    pd1_outputs = pd1_whitebox_model.step(conc, pd1_step_dt)
+                    last_pd1_update_time = effective_time
+                    pd1_pending_dt = 0.0
+                    pd1_step_status = 1.0
+                except NumericsError as exc:
+                    pd1_step_status = -1.0
+                    pd1_last_error_flag = 1.0
+                    pd1_pending_dt = 0.0
+                    if not pd1_solver_warned:
+                        logger.warning(
+                            "pd1_alignment solver failed (NumericsError) t=%.6g dt=%.3g: %s",
+                            effective_time,
+                            pd1_step_dt,
+                            exc,
+                        )
+                        pd1_solver_warned = True
+                except Exception as exc:  # noqa: BLE001
+                    pd1_step_status = -1.0
+                    pd1_last_error_flag = 1.0
+                    pd1_pending_dt = 0.0
+                    if not pd1_solver_warned:
+                        logger.exception(
+                            "pd1_alignment solver failed unexpectedly t=%.6g dt=%.3g",
+                            effective_time,
+                            pd1_step_dt,
+                        )
+                        pd1_solver_warned = True
+            pd1_whitebox_model.writeback(context)
             occ_state = pd1_outputs.occupancy
             pd1_whitebox_raw_value = pd1_outputs.raw_complexes
             pd1_blocked_fraction = pd1_outputs.blocked_fraction
             context["pd1_whitebox_blocked_fraction"] = pd1_blocked_fraction
             context["pd1_whitebox_complex_density"] = pd1_outputs.complex_density
-            context["pd1_alignment_step_dt"] = pd1_step_dt if should_step else 0.0
+            context["pd1_alignment_step_dt"] = pd1_step_dt
+            context["pd1_alignment_step_status"] = pd1_step_status
+            context["pd1_alignment_last_error"] = pd1_last_error_flag
             context["pd1_alignment_step_count"] = float(pd1_step_count)
             context["pd1_alignment_debug_enabled"] = 1.0 if debug_enabled else 0.0
             context["pd1_alignment_pending_dt"] = pd1_pending_dt
@@ -601,6 +644,8 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
             context["pd1_whitebox_complex_density"] = float(context.get("syn_pd1_pdl1", 0.0))
             context["pd1_whitebox_blocked_fraction"] = pd1_blocked_fraction
             context["pd1_alignment_step_dt"] = 0.0
+            context["pd1_alignment_step_status"] = 0.0
+            context["pd1_alignment_last_error"] = 0.0
             context["pd1_alignment_step_count"] = float(pd1_step_count)
             context["pd1_alignment_debug_enabled"] = 0.0
             context["pd1_alignment_pending_dt"] = pd1_pending_dt
