@@ -73,6 +73,20 @@ PD‑1 子系统已经照 stiff solver 模板完成白盒迁移（probe → diff
     - 把 `pd1_alignment_min_dt_days` 或内部 pending gate 提到 1e-4 左右，避免 BDF 在 machine‑eps 级别挣扎；
     - 或者在 `pd1_whitebox_model.step` 内部添加兜底，若 span 太小就直接重用上一状态，防止 driver 卡死。
     - 一旦 solver 稳定，再重跑 `--dump-flat-debug` 验证 `syn_pd1_pdl1` 是否离开 0。
+6. ✅ 2025‑11‑20 更新：在不改 `switches.py` 主逻辑的前提下，通过 CLI 覆盖 `pd1_alignment_max_step_days=0.01` 与 `pd1_alignment_solver_atol=1e-10`，并启用 `alignment_mode=2` 让三大白盒一起运行，A1 终于可以稳定集齐 `pd1_alignment_step_status=1`（参见 `artifacts/validation/A1_flat_debug_20251119T154410.csv`，共 49 次成功步进、0 次 NumericsError）。运行命令：
+
+```bash
+python -m scripts.validate_surrogate --scenarios A1 --ic-mode snapshot \
+  --module-block alignment_driver_block --emit-diagnostics --dump-flat-debug 50 \
+  --param-override alignment_mode=2 \
+  --param-override pd1_alignment_use_whitebox=1 \
+  --param-override tcell_alignment_use_whitebox=1 \
+  --param-override geometry_alignment_use_whitebox=1 \
+  --param-override pd1_alignment_max_step_days=0.01 \
+  --param-override pd1_alignment_solver_atol=1e-10
+```
+
+上述 run 说明 pending gate=0.5 天时每一步都会被拆分成 solver 内部 0.01 天的小步，`syn_pd1_pdl1≈2.7e-6` 很快“破零”，也为后续 A2–A6 的 numerics 验证提供了可复现模板。
 
 ### Step E — 数据/文档
 1. 决定是否需要干净的 T cell/几何训练集：如果要拟合，就仿照 PD‑1 写 clean exporter 并生成 parquet。

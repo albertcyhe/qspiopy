@@ -522,6 +522,25 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
         refresh_schedule()
         raw_snapshot_occ = float(context.get("H_PD1_C1", occ_state))
         current_time = float(context.get("time_days", context.get("t", 0.0)))
+
+        reset_detected = False
+        if last_time is not None and current_time + 1e-9 < last_time:
+            reset_detected = True
+        elif monotonic_time is not None and current_time + 1e-9 < monotonic_time:
+            reset_detected = True
+        if reset_detected:
+            logger.debug(
+                "alignment_driver detected time reset: prev=%.6g current=%.6g",
+                last_time if last_time is not None else -1.0,
+                current_time,
+            )
+            last_time = None
+            monotonic_time = None
+            last_pd1_effective_time = None
+            last_pd1_update_time = None
+            pd1_pending_dt = 0.0
+            pd1_step_count = 0
+            pd1_whitebox_model = None
         if monotonic_time is None or current_time >= monotonic_time - 1e-15:
             monotonic_time = current_time
         effective_time = monotonic_time if monotonic_time is not None else current_time
@@ -581,7 +600,7 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
             min_gate = max(pd1_min_dt_days, 1e-4)
             pending_dt = pd1_pending_dt
             should_step = pending_dt >= min_gate
-            pd1_step_dt = pending_dt if should_step else 0.0
+            pd1_step_dt = pending_dt
             pd1_step_status = 0.0
             pd1_last_error_flag = 0.0
             pd1_outputs = _pd1_outputs_from_model(pd1_whitebox_model)
@@ -631,12 +650,13 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
             pd1_blocked_fraction = pd1_outputs.blocked_fraction
             context["pd1_whitebox_blocked_fraction"] = pd1_blocked_fraction
             context["pd1_whitebox_complex_density"] = pd1_outputs.complex_density
+            pending_display = pending_dt if should_step else pd1_pending_dt
             context["pd1_alignment_step_dt"] = pd1_step_dt
             context["pd1_alignment_step_status"] = pd1_step_status
             context["pd1_alignment_last_error"] = pd1_last_error_flag
             context["pd1_alignment_step_count"] = float(pd1_step_count)
             context["pd1_alignment_debug_enabled"] = 1.0 if debug_enabled else 0.0
-            context["pd1_alignment_pending_dt"] = pd1_pending_dt
+            context["pd1_alignment_pending_dt"] = pending_display
         else:
             if delta_t > 0.0:
                 d_occ = kon_eff * conc * (1.0 - occ_state) - (koff_eff + k_int) * occ_state
