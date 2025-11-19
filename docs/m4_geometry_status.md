@@ -87,6 +87,12 @@ python -m scripts.validate_surrogate --scenarios A1 --ic-mode snapshot \
 ```
 
 上述 run 说明 pending gate=0.5 天时每一步都会被拆分成 solver 内部 0.01 天的小步，`syn_pd1_pdl1≈2.7e-6` 很快“破零”，也为后续 A2–A6 的 numerics 验证提供了可复现模板。
+7. ⚠️ 2025‑11‑21 更新：按同样 override 跑 `A1–A6` 全量验证时，PD‑1 solver 仍会在多剂量段（t≈14 d 和 t≈63 d）报 `NumericsError: Required step size is less than spacing between numbers`。我们已经依次尝试：
+    - 在 runtime 中引入 `pd1_alignment_step_chunk_days`（默认 1e‑3 d）+ `pd1_alignment_max_pending_days`，并在 `switches.py` 里把 pending gate 拆成多次 chunk 迭代；
+    - 在 chunk 内部增加二分重试，最多 20 次将 span 对半再 integrate；
+    - 把 `pd1_whitebox.py` 的 `_advance` 递归上限从 6 提到 12，并把最小 span 改为 1e‑8 d；
+    - 结果仍然在 `dt≈1e-6` 级别触碰 solver 极限：A1 可稳定，A2–A6 会随着 pending bucket 膨胀掉进 `Required step size < spacing` 报错。
+   下一步选项：① 缩小 runtime pending gate（例如把 0.5 d 改成 0.05 d），避免 BDF 被迫跨 0.5 d；② 为 A2–A6 单独下发更严的 solver 参数（`max_step=0.001`, `rtol=1e-8`），乃至将 PD‑1 步进融入外层 segment integrator。待确定方案后，再 rerun `scripts.validate_surrogate --numeric-gates` 收敛整个 A 系列。
 
 ### Step E — 数据/文档
 1. 决定是否需要干净的 T cell/几何训练集：如果要拟合，就仿照 PD‑1 写 clean exporter 并生成 parquet。

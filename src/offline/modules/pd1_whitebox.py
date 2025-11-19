@@ -222,7 +222,7 @@ class PD1WhiteboxModel:
                     debug=debug_cb,
                 )
             except NumericsError:
-                if depth >= 6 or span <= 1e-6:
+                if depth >= 12 or span <= 1e-8:
                     raise
                 mid = t0 + 0.5 * span
                 mid_state = _advance(t0, mid, state, depth + 1)

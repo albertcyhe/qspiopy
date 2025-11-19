@@ -1,2 +1,2 @@
 scenario,surrogate,reference
-A1,artifacts/validation/A1_surrogate.csv,artifacts/validation/A1_reference.csv
+A6,artifacts/validation/A6_surrogate.csv,artifacts/validation/A6_reference.csv

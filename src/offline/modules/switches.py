@@ -446,8 +446,17 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
     pd1_whitebox_model: Optional[PD1WhiteboxModel] = None
     pd1_min_dt_days = max(float(parameters.get("pd1_alignment_min_dt_days", 0.0)), 0.0)
     pd1_solver_rtol = max(float(parameters.get("pd1_alignment_solver_rtol", pd1_params.solver_rtol)), 1e-10)
-    pd1_solver_atol = max(float(parameters.get("pd1_alignment_solver_atol", pd1_params.solver_atol)), 1e-12)
-    pd1_solver_max_step = max(float(parameters.get("pd1_alignment_max_step_days", pd1_params.max_step_days)), 1e-9)
+    default_pd1_atol = max(pd1_params.solver_atol, 1e-10)
+    pd1_solver_atol = max(float(parameters.get("pd1_alignment_solver_atol", default_pd1_atol)), 1e-12)
+    default_pd1_max_step = float(parameters.get("pd1_alignment_max_step_days", 0.01))
+    if default_pd1_max_step <= 0.0:
+        default_pd1_max_step = 0.01
+    pd1_solver_max_step = max(default_pd1_max_step, 1e-9)
+    pd1_step_chunk_days = max(float(parameters.get("pd1_alignment_step_chunk_days", 0.001)), 1e-6)
+    pd1_step_chunk_days = min(pd1_step_chunk_days, pd1_solver_max_step)
+    pd1_ramp_chunk_days = max(float(parameters.get("pd1_alignment_ramp_chunk_days", 0.01)), 1e-6)
+    pd1_ramp_chunk_days = min(pd1_ramp_chunk_days, pd1_step_chunk_days)
+    pd1_max_pending_days = max(float(parameters.get("pd1_alignment_max_pending_days", 0.05)), max(pd1_min_dt_days, 1e-6))
     pd1_context_conc_min = max(float(parameters.get("pd1_alignment_context_conc_min_molar", 1e-12)), 0.0)
     pd1_solver_config = SolverConfig(
         method="BDF",
@@ -491,6 +500,7 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
     monotonic_time: float | None = None
     pd1_pending_dt = 0.0
     pd1_solver_warned = False
+    last_conc_state: float | None = None
 
     def refresh_schedule() -> None:
         nonlocal schedule_source, schedule, dose_index
@@ -517,7 +527,7 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
         return min_volume_l
 
     def apply(context: MutableMapping[str, float]) -> None:
-        nonlocal pk_state, occ_state, volume_state, last_time, dose_index, tcell_state, pd1_whitebox_model, tcell_whitebox_model, geometry_whitebox_model, last_pd1_update_time, pd1_step_count, monotonic_time, last_pd1_effective_time, pd1_pending_dt, pd1_solver_warned
+        nonlocal pk_state, occ_state, volume_state, last_time, dose_index, tcell_state, pd1_whitebox_model, tcell_whitebox_model, geometry_whitebox_model, last_pd1_update_time, pd1_step_count, monotonic_time, last_pd1_effective_time, pd1_pending_dt, pd1_solver_warned, last_conc_state
 
         refresh_schedule()
         raw_snapshot_occ = float(context.get("H_PD1_C1", occ_state))
@@ -541,6 +551,7 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
             pd1_pending_dt = 0.0
             pd1_step_count = 0
             pd1_whitebox_model = None
+            last_conc_state = None
         if monotonic_time is None or current_time >= monotonic_time - 1e-15:
             monotonic_time = current_time
         effective_time = monotonic_time if monotonic_time is not None else current_time
@@ -583,6 +594,9 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
         projected_conc = max(_finite_value(projected_conc), 0.0)
         projected_surface = max(_finite_value(projected_surface), 0.0)
 
+        if last_conc_state is None:
+            last_conc_state = conc
+
         pd1_whitebox_raw_value = raw_snapshot_occ
         pd1_blocked_fraction = occ_state
         context["pd1_whitebox_snapshot_occ"] = raw_snapshot_occ
@@ -600,7 +614,7 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
             min_gate = max(pd1_min_dt_days, 1e-4)
             pending_dt = pd1_pending_dt
             should_step = pending_dt >= min_gate
-            pd1_step_dt = pending_dt
+            pd1_step_dt = 0.0
             pd1_step_status = 0.0
             pd1_last_error_flag = 0.0
             pd1_outputs = _pd1_outputs_from_model(pd1_whitebox_model)
@@ -614,43 +628,90 @@ def alignment_driver_block(model: FrozenModel) -> ModuleBlock:
                     min_gate,
                     should_step,
                 )
-            if should_step:
-                pd1_step_count += 1
-                try:
-                    pd1_outputs = pd1_whitebox_model.step(conc, pd1_step_dt)
-                    last_pd1_update_time = effective_time
-                    pd1_pending_dt = 0.0
-                    pd1_step_status = 1.0
-                except NumericsError as exc:
-                    pd1_step_status = -1.0
-                    pd1_last_error_flag = 1.0
-                    pd1_pending_dt = 0.0
-                    if not pd1_solver_warned:
-                        logger.warning(
-                            "pd1_alignment solver failed (NumericsError) t=%.6g dt=%.3g: %s",
-                            effective_time,
-                            pd1_step_dt,
-                            exc,
-                        )
-                        pd1_solver_warned = True
-                except Exception as exc:  # noqa: BLE001
-                    pd1_step_status = -1.0
-                    pd1_last_error_flag = 1.0
-                    pd1_pending_dt = 0.0
-                    if not pd1_solver_warned:
-                        logger.exception(
-                            "pd1_alignment solver failed unexpectedly t=%.6g dt=%.3g",
-                            effective_time,
-                            pd1_step_dt,
-                        )
-                        pd1_solver_warned = True
+            failed_step = False
+            total_span_full = pd1_pending_dt
+            if total_span_full <= 0.0:
+                total_span_full = max(min_gate, 1e-12)
+            drained_span = 0.0
+            delta_conc = conc - last_conc_state
+            while pd1_pending_dt >= min_gate - 1e-12:
+                base_step = min(pd1_pending_dt, pd1_max_pending_days)
+                step_trial = base_step
+                subdivisions = 0
+                attempt_success = False
+                while True:
+                    pd1_step_dt = step_trial
+                    pd1_step_count += 1
+                    print(
+                        f"DEBUG: solving sub-step t={effective_time:.4f} remaining={pd1_pending_dt:.6f}",
+                        flush=True,
+                    )
+                    start_fraction = 0.0 if total_span_full <= 0.0 else min(drained_span / total_span_full, 1.0)
+                    end_fraction = 1.0 if total_span_full <= 0.0 else min((drained_span + step_trial) / total_span_full, 1.0)
+                    seg_start_conc = last_conc_state + delta_conc * start_fraction
+                    seg_end_conc = last_conc_state + delta_conc * end_fraction
+                    remaining = step_trial
+                    current_offset = 0.0
+                    try:
+                        if step_trial <= 1e-9 or abs(seg_end_conc - seg_start_conc) <= 1e-15:
+                            pd1_outputs = pd1_whitebox_model.step(seg_end_conc, step_trial)
+                            remaining = 0.0
+                        else:
+                            while remaining > 1e-12:
+                                span = min(remaining, pd1_ramp_chunk_days)
+                                mid_fraction = (current_offset + 0.5 * span) / max(step_trial, 1e-12)
+                                sub_conc = seg_start_conc + (seg_end_conc - seg_start_conc) * mid_fraction
+                                pd1_outputs = pd1_whitebox_model.step(sub_conc, span)
+                                remaining -= span
+                                current_offset += span
+                        pd1_pending_dt = max(pd1_pending_dt - step_trial, 0.0)
+                        drained_span += step_trial
+                        last_pd1_update_time = effective_time - pd1_pending_dt
+                        pd1_step_status = 1.0
+                        attempt_success = True
+                        break
+                    except NumericsError as exc:
+                        subdivisions += 1
+                        if step_trial <= 1e-7 or subdivisions >= 20:
+                            pd1_step_status = -1.0
+                            pd1_last_error_flag = 1.0
+                            pd1_pending_dt = 0.0
+                            if not pd1_solver_warned:
+                                logger.warning(
+                                    "pd1_alignment solver failed (NumericsError) t=%.6g dt=%.3g: %s",
+                                    effective_time,
+                                    step_trial,
+                                    exc,
+                                )
+                                pd1_solver_warned = True
+                            failed_step = True
+                            break
+                        step_trial *= 0.5
+                        continue
+                    except Exception as exc:  # noqa: BLE001
+                        pd1_step_status = -1.0
+                        pd1_last_error_flag = 1.0
+                        pd1_pending_dt = 0.0
+                        if not pd1_solver_warned:
+                            logger.exception(
+                                "pd1_alignment solver failed unexpectedly t=%.6g dt=%.3g",
+                                effective_time,
+                                step_trial,
+                            )
+                            pd1_solver_warned = True
+                        failed_step = True
+                        break
+                if failed_step or not attempt_success:
+                    break
+            if not failed_step:
+                last_conc_state = conc
             pd1_whitebox_model.writeback(context)
             occ_state = pd1_outputs.occupancy
             pd1_whitebox_raw_value = pd1_outputs.raw_complexes
             pd1_blocked_fraction = pd1_outputs.blocked_fraction
             context["pd1_whitebox_blocked_fraction"] = pd1_blocked_fraction
             context["pd1_whitebox_complex_density"] = pd1_outputs.complex_density
-            pending_display = pending_dt if should_step else pd1_pending_dt
+            pending_display = pd1_pending_dt
             context["pd1_alignment_step_dt"] = pd1_step_dt
             context["pd1_alignment_step_status"] = pd1_step_status
             context["pd1_alignment_last_error"] = pd1_last_error_flag
